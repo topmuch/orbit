@@ -1,0 +1,87 @@
+// Orbit — Schéma de base de données (Phase 1)
+// SQLite via Prisma (adaptation environnement sandbox — PostgreSQL/Supabase en production)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String             @id @default(cuid())
+  email            String             @unique
+  passwordHash     String
+  name             String?
+  preferences      Json?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  events           Event[]
+  tasks            Task[]
+  emailLogs        EmailLog[]
+  pushSubscriptions PushSubscription[]
+}
+
+model Event {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title          String
+  description    String?
+  startTime      DateTime
+  endTime        DateTime
+  source         String    @default("manual") // manual | email_extract | ai
+  attendees      Json?
+  reminderSentAt DateTime? // horodatage du rappel « J-15 min » (nullable = pas encore notifié)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([userId, startTime])
+}
+
+model Task {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  status      String    @default("todo") // todo | doing | done
+  priority    Int       @default(1) // 0 = basse, 1 = moyenne, 2 = haute
+  dueDate        DateTime?
+  aiPriority     Int?
+  reminderSentAt DateTime? // horodatage du rappel « H-1 » (nullable = pas encore notifié)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([userId, status])
+}
+
+model EmailLog {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messageId      String    @unique
+  fromAddress    String
+  fromName       String?
+  subject        String
+  bodyText       String
+  receivedAt     DateTime
+  isRead         Boolean   @default(false)
+  isProcessed    Boolean   @default(false)
+  suggestedEvent Json? // Résultat d'extraction IA en attente de confirmation
+  createdAt      DateTime  @default(now())
+
+  @@index([userId, receivedAt])
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String
+  keys      Json
+  createdAt DateTime @default(now())
+}

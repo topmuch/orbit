@@ -1,0 +1,259 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  /* Marque Orbit — exposées en utilitaires Tailwind :
+     bg-orbit-accent, text-orbit-cyan, border-orbit-deep, … */
+  --color-orbit-deep: #0a2540;
+  --color-orbit-cyan: #00d4ff;
+  --color-orbit-cyan-strong: #0074a0;
+  --color-orbit-cyan-soft: #7fe6ff;
+  --color-orbit-accent: #ff6b35;
+  --color-orbit-accent-strong: #e8601f;
+}
+
+/* Animation de shimmer des skeletons (utilitaire : animate-orbit-shimmer) */
+@theme {
+  --animate-orbit-shimmer: orbit-shimmer 1.8s ease-in-out infinite;
+  @keyframes orbit-shimmer {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(100%);
+    }
+  }
+}
+
+/* ============================================================
+   Orbit — Design tokens
+   Palette de marque (décision utilisateur — remplace l'ancien
+   thème ambre « cosmos ») :
+   · Bleu profond #0A2540 (primaire clair / fond sombre)
+   · Cyan #00D4FF (action en sombre, accents, ring)
+   · Orange #FF6B35 (accent de marque)
+   · Neutres #F5F5F7 → #1A1A1A
+   Contrastes vérifiés WCAG AA (texte) sur les deux modes.
+   ============================================================ */
+
+:root {
+  --radius: 0.75rem;
+  --background: #f5f5f7;
+  --foreground: #1a1a1a;
+  --card: #ffffff;
+  --card-foreground: #1a1a1a;
+  --popover: #ffffff;
+  --popover-foreground: #1a1a1a;
+  --primary: #0a2540;
+  --primary-foreground: #ffffff;
+  --secondary: #e8edf2;
+  --secondary-foreground: #0a2540;
+  --muted: #eef0f4;
+  --muted-foreground: #5c6674;
+  --accent: #dff5fe;
+  --accent-foreground: #0a2540;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #dce1e8;
+  --input: #dce1e8;
+  --ring: #00d4ff;
+  --chart-1: #00d4ff;
+  --chart-2: #ff6b35;
+  --chart-3: #0a2540;
+  --chart-4: #7fe6ff;
+  --chart-5: #5c6674;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1a1a1a;
+  --sidebar-primary: #0a2540;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #dff5fe;
+  --sidebar-accent-foreground: #0a2540;
+  --sidebar-border: #dce1e8;
+  --sidebar-ring: #00d4ff;
+}
+
+.dark {
+  --background: #071729;
+  --foreground: #e8f1f8;
+  --card: #0d2942;
+  --card-foreground: #e8f1f8;
+  --popover: #0d2942;
+  --popover-foreground: #e8f1f8;
+  --primary: #00d4ff;
+  --primary-foreground: #06182b;
+  --secondary: #0e3352;
+  --secondary-foreground: #b8e8f7;
+  --muted: #0c2a45;
+  --muted-foreground: #8ca3b8;
+  --accent: #0f3b5f;
+  --accent-foreground: #7fe6ff;
+  --destructive: #f87171;
+  --destructive-foreground: #ffffff;
+  --border: #143a5c;
+  --input: #143a5c;
+  --ring: #00d4ff;
+  --chart-1: #00d4ff;
+  --chart-2: #ff6b35;
+  --chart-3: #7fe6ff;
+  --chart-4: #b8e8f7;
+  --chart-5: #8ca3b8;
+  --sidebar: #0a2236;
+  --sidebar-foreground: #e8f1f8;
+  --sidebar-primary: #00d4ff;
+  --sidebar-primary-foreground: #06182b;
+  --sidebar-accent: #0f3b5f;
+  --sidebar-accent-foreground: #7fe6ff;
+  --sidebar-border: #143a5c;
+  --sidebar-ring: #00d4ff;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ============================================================
+   Orbit — Atmosphère spatiale
+   Nébuleuses discrètes cyan (#00D4FF faible opacité) + orange
+   (#FF6B35 plus faible) sur bleu nuit en sombre — quasi neutres
+   en clair.
+   ============================================================ */
+
+/* Fond cosmique appliqué à un div fixed inset-0 -z-10 */
+.orbit-cosmos {
+  background:
+    radial-gradient(ellipse 80% 50% at 85% -10%, rgba(0, 212, 255, 0.05), transparent),
+    radial-gradient(ellipse 60% 45% at 8% 110%, rgba(255, 107, 53, 0.03), transparent);
+}
+
+.dark .orbit-cosmos {
+  background:
+    radial-gradient(ellipse 80% 50% at 85% -10%, rgba(0, 212, 255, 0.1), transparent),
+    radial-gradient(ellipse 60% 45% at 8% 110%, rgba(255, 107, 53, 0.06), transparent);
+}
+
+/* Champ d'étoiles — 3 couches tuilées pour la profondeur (visible en sombre) */
+.dark .orbit-stars {
+  background-image:
+    radial-gradient(1.5px 1.5px at 18px 32px, rgba(255, 255, 255, 0.9), transparent),
+    radial-gradient(1px 1px at 86px 12px, rgba(255, 255, 255, 0.55), transparent),
+    radial-gradient(1px 1px at 140px 74px, rgba(127, 230, 255, 0.7), transparent),
+    radial-gradient(1.5px 1.5px at 230px 150px, rgba(255, 255, 255, 0.5), transparent),
+    radial-gradient(1px 1px at 320px 40px, rgba(184, 232, 247, 0.45), transparent),
+    radial-gradient(1px 1px at 260px 250px, rgba(127, 230, 255, 0.5), transparent);
+  background-size:
+    340px 340px,
+    340px 340px,
+    340px 340px,
+    560px 560px,
+    560px 560px,
+    560px 560px;
+}
+
+/* Animation douce d'orbite pour le logo */
+@keyframes orbit-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.animate-orbit {
+  animation: orbit-spin 14s linear infinite;
+}
+.animate-orbit-slow {
+  animation: orbit-spin 30s linear infinite;
+}
+
+/* Pulsation discrète pour les indicateurs live */
+@keyframes orbit-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.82);
+  }
+}
+.animate-live-dot {
+  animation: orbit-pulse 2.2s ease-in-out infinite;
+}
+
+/* Scrollbar fine et discrète */
+.orbit-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.orbit-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.orbit-scroll::-webkit-scrollbar-thumb {
+  background: var(--muted-foreground);
+  border-radius: 999px;
+  opacity: 0.35;
+}
+.orbit-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted-foreground) transparent;
+}
+
+/* Curseur de frappe pour le chat IA */
+@keyframes caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.caret-blink {
+  animation: caret-blink 1s step-end infinite;
+}

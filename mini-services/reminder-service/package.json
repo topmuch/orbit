@@ -1,0 +1,11 @@
+{
+  "name": "orbit-reminder-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Orbit — planificateur de rappels push (15 min avant un événement, 1 h avant une échéance de tâche). Déclenche POST /api/notify avec le secret de service.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  }
+}

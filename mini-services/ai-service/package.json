@@ -1,0 +1,14 @@
+{
+  "name": "orbit-ai-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Orbit — micro-service IA (routeur Ollama → fallback z-ai-web-dev-sdk). Équivalent sandbox du micro-service FastAPI de production (docker/ai-service).",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "z-ai-web-dev-sdk": "^0.0.18"
+  }
+}

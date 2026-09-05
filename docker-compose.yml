@@ -1,0 +1,66 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Infrastructure IA locale (production hors sandbox)
+# ───────────────────────────────────────────────────────────────────────────
+# Objectif de confidentialité d'Orbit : AUCUNE donnée ne quitte la machine.
+#
+# Démarrage complet :
+#   docker compose up -d
+#   # le premier démarrage télécharge llama3 (~4,7 Go) automatiquement
+#   # (sinon : ollama pull llama3)
+#
+# Le micro-service FastAPI expose sur http://localhost:3031 le MÊME contrat
+# REST que le mini-service bun de développement :
+#   GET /health · POST /analyze-email · POST /chat (streaming)
+#
+# Côté Next.js, il suffit de définir dans .env :
+#   AI_SERVICE_URL=http://localhost:3031
+#   OLLAMA_URL=http://localhost:11434
+#   OLLAMA_MODEL=llama3
+# ───────────────────────────────────────────────────────────────────────────
+# En développement sandbox (sans Docker), l'équivalent est :
+#   mini-services/ai-service (bun --hot, port 3031, fallback z-ai-web-dev-sdk)
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  # ── Moteur d'inférence local (Llama 3 8B quantifié) ──────────────────────
+  ollama:
+    build: docker/ollama
+    container_name: orbit-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama # les modèles persistent entre les redémarrages
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q llama3 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s # marge pour le téléchargement initial du modèle
+    # Décommenter pour accélérer l'inférence sur machine équipée :
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           capabilities: [gpu]
+
+  # ── Micro-service IA (FastAPI) — même contrat que mini-services/ai-service ─
+  ai-api:
+    build: docker/ai-service
+    container_name: orbit-ai-api
+    restart: unless-stopped
+    ports:
+      - "3031:3031"
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      OLLAMA_TIMEOUT_MS: "90000"
+    depends_on:
+      ollama:
+        condition: service_healthy # on attend que llama3 soit prêt
+
+volumes:
+  ollama_models:

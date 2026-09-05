@@ -1,0 +1,428 @@
+"use client";
+
+// Orbit — Tableau de bord : vue d'ensemble de la journée
+
+import { useState } from "react"
+import { addDays, format, isBefore, isToday, parseISO, startOfDay } from "date-fns"
+import { fr } from "date-fns/locale"
+import { toast } from "sonner"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Skeleton } from "@/components/ui/skeleton"
+import { EventDialog } from "@/components/orbit/event-dialog"
+import { TaskDialog } from "@/components/orbit/task-dialog"
+import {
+  useStats,
+  useTaskMutations,
+  useEmailMutations,
+} from "@/lib/api-client"
+import type { SessionUser, TaskDto, EventDto, OrbitView } from "@/lib/types"
+import {
+  CalendarDays,
+  ListTodo,
+  Mail,
+  CheckCircle2,
+  Plus,
+  Sparkles,
+  RefreshCw,
+  ArrowUpRight,
+  Flag,
+  Check,
+  Sun,
+  Moon,
+  Clock,
+} from "lucide-react"
+
+function greeting(): string {
+  const h = new Date().getHours()
+  if (h < 6) return "Bonne nuit"
+  if (h < 12) return "Bonjour"
+  if (h < 18) return "Bel après-midi"
+  return "Bonsoir"
+}
+
+function SourceBadge({ source }: { source: string }) {
+  if (source === "manual") return null
+  return (
+    <Badge variant="secondary" className="gap-1 px-1.5 text-[10px] font-normal">
+      {source === "email_extract" ? <Mail className="size-2.5" aria-hidden /> : <Sparkles className="size-2.5" aria-hidden />}
+      {source === "email_extract" ? "email" : "IA"}
+    </Badge>
+  )
+}
+
+export function DashboardView({
+  user,
+  onNavigate,
+}: {
+  user: SessionUser
+  onNavigate?: (view: OrbitView, emailId?: string) => void
+}) {
+  const { data, isLoading } = useStats()
+  const { update: updateTask } = useTaskMutations()
+  const { sync } = useEmailMutations()
+
+  const [eventDialogOpen, setEventDialogOpen] = useState(false)
+  const [editEvent, setEditEvent] = useState<EventDto | null>(null)
+  const [taskDialogOpen, setTaskDialogOpen] = useState(false)
+
+  const stats = data?.stats
+  const now = new Date()
+
+  const firstName = (user.name ?? user.email).split(/[\s@]/)[0]
+  const dateLabel = format(now, "EEEE d MMMM", { locale: fr })
+  const isNight = now.getHours() < 6 || now.getHours() >= 21
+
+  async function completeTask(task: TaskDto) {
+    try {
+      await updateTask.mutateAsync({ id: task.id, input: { status: "done" } })
+      toast.success("Tâche terminée 🎉", { description: task.title })
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
+  }
+
+  async function handleSync() {
+    try {
+      const res = await sync.mutateAsync()
+      toast.success(`${res.count} nouvel(s) email(s) récupéré(s)`, {
+        description: "Connecteur IMAP simulé — branchez votre boîte en Phase 3.",
+      })
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* ---------- En-tête ---------- */}
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight sm:text-3xl">
+            {isNight ? <Moon className="size-6 text-primary" aria-hidden /> : <Sun className="size-6 text-primary" aria-hidden />}
+            {greeting()}, {firstName}
+          </h1>
+          <p className="mt-1 text-sm capitalize text-muted-foreground">
+            {dateLabel}
+            {stats?.nextEvent && (
+              <>
+                {" · "}
+                <span className="normal-case">
+                  Prochain : {stats.nextEvent.title} à{" "}
+                  {format(parseISO(stats.nextEvent.startTime), "HH:mm", { locale: fr })}
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => setEventDialogOpen(true)}>
+            <Plus className="size-4" aria-hidden />
+            Événement
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setTaskDialogOpen(true)}>
+            <Plus className="size-4" aria-hidden />
+            Tâche
+          </Button>
+          <Button size="sm" variant="outline" onClick={handleSync} disabled={sync.isPending}>
+            <RefreshCw className={sync.isPending ? "size-4 animate-spin" : "size-4"} aria-hidden />
+            <span className="hidden sm:inline">Synchroniser</span>
+          </Button>
+        </div>
+      </header>
+
+      {/* ---------- Statistiques ---------- */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 sm:gap-4">
+        {isLoading || !stats ? (
+          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28 rounded-xl" />)
+        ) : (
+          <>
+            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <CalendarDays className="size-5 text-primary" aria-hidden />
+                  <span className="text-3xl font-semibold tabular-nums">{stats.eventsToday}</span>
+                </div>
+                <p className="mt-2 text-sm font-medium">Événements aujourd&apos;hui</p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.eventsToday > 0
+                    ? `de ${format(parseISO(stats.todayEvents[0].startTime), "HH:mm")} à ${format(parseISO(stats.todayEvents[stats.todayEvents.length - 1].endTime), "HH:mm")}`
+                    : "Journée libre"}
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <ListTodo className="size-5 text-emerald-500" aria-hidden />
+                  <span className="text-3xl font-semibold tabular-nums">
+                    {stats.tasksTodo + stats.tasksDoing}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm font-medium">Tâches actives</p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.tasksDoing} en cours
+                  {stats.tasksOverdue > 0 && (
+                    <span className="text-red-500"> · {stats.tasksOverdue} en retard</span>
+                  )}
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <Mail className="size-5 text-violet-500" aria-hidden />
+                  <span className="text-3xl font-semibold tabular-nums">{stats.unreadEmails}</span>
+                </div>
+                <p className="mt-2 text-sm font-medium">Emails non lus</p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.unprocessedEmails > 0
+                    ? `${stats.unprocessedEmails} à analyser`
+                    : "Boîte à jour"}
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <CheckCircle2 className="size-5 text-teal-500" aria-hidden />
+                  <span className="text-3xl font-semibold tabular-nums">{stats.tasksDone}</span>
+                </div>
+                <p className="mt-2 text-sm font-medium">Tâches terminées</p>
+                <p className="text-xs text-muted-foreground">Gardez le rythme ✨</p>
+              </CardContent>
+            </Card>
+          </>
+        )}
+      </div>
+
+      {/* ---------- Charge de la semaine ---------- */}
+      <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-base font-medium">
+            <Clock className="size-4 text-primary" aria-hidden />
+            Semaine à venir
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoading || !stats ? (
+            <Skeleton className="h-24 w-full" />
+          ) : (
+            <div className="grid grid-cols-7 items-end gap-1 sm:gap-2">
+              {stats.weekLoad.map((d) => {
+                const date = parseISO(d.date)
+                const today = isToday(date)
+                const maxCount = Math.max(...stats.weekLoad.map((x) => x.count), 1)
+                const h = d.count === 0 ? 4 : Math.max(10, (d.count / maxCount) * 56)
+                return (
+                  <div key={d.date} className="flex flex-col items-center gap-1.5">
+                    <span className="text-[10px] tabular-nums text-muted-foreground">
+                      {d.count > 0 ? d.count : ""}
+                    </span>
+                    <div
+                      className={`w-full max-w-10 rounded-md transition-all ${today ? "bg-primary" : d.count > 0 ? "bg-primary/50" : "bg-muted"}`}
+                      style={{ height: `${h}px` }}
+                      role="img"
+                      aria-label={`${format(date, "EEEE", { locale: fr })} : ${d.count} événement(s)`}
+                    />
+                    <span className={`text-[11px] font-medium ${today ? "text-primary" : "text-muted-foreground"}`}>
+                      {format(date, "EEE", { locale: fr })}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ---------- Agenda du jour + tâches ---------- */}
+      {/* QA Task 8 : grid-cols-1 explicite (minmax(0,1fr)) — sans lui, la piste
+          auto implicite sous lg prenait la min-content des descriptions truncate
+          (white-space:nowrap) → overflow horizontal ~1300px en viewport 375px. */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+          <CardHeader className="flex-row items-center justify-between pb-3">
+            <CardTitle className="text-base font-medium">Aujourd&apos;hui</CardTitle>
+            <Button variant="ghost" size="sm" className="h-8 gap-1 text-xs text-muted-foreground" onClick={() => onNavigate?.("calendar")}>
+              Calendrier
+              <ArrowUpRight className="size-3.5" aria-hidden />
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {isLoading || !stats ? (
+              Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12" />)
+            ) : stats.todayEvents.length === 0 ? (
+              <button
+                onClick={() => setEventDialogOpen(true)}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border py-8 text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+              >
+                <Plus className="size-4" aria-hidden />
+                Aucun événement — en ajouter un ?
+              </button>
+            ) : (
+              stats.todayEvents.map((ev) => {
+                const start = parseISO(ev.startTime)
+                const end = parseISO(ev.endTime)
+                const past = isBefore(end, now)
+                return (
+                  <button
+                    key={ev.id}
+                    onClick={() => {
+                      setEditEvent(ev)
+                      setEventDialogOpen(true)
+                    }}
+                    className={`flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent/50 ${past ? "opacity-55" : ""}`}
+                  >
+                    <span className="w-12 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                      {format(start, "HH:mm")}
+                    </span>
+                    <span className={`h-9 w-1 shrink-0 rounded-full ${past ? "bg-muted" : "bg-primary/70"}`} aria-hidden />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className={`truncate text-sm font-medium ${past ? "line-through" : ""}`}>{ev.title}</span>
+                        <SourceBadge source={ev.source} />
+                      </span>
+                      <span className="block truncate text-xs text-muted-foreground">
+                        {format(start, "HH:mm")}–{format(end, "HH:mm")}
+                        {ev.description ? ` · ${ev.description}` : ""}
+                      </span>
+                    </span>
+                  </button>
+                )
+              })
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+          <CardHeader className="flex-row items-center justify-between pb-3">
+            <CardTitle className="text-base font-medium">Priorités</CardTitle>
+            <Button variant="ghost" size="sm" className="h-8 gap-1 text-xs text-muted-foreground" onClick={() => onNavigate?.("tasks")}>
+              Kanban
+              <ArrowUpRight className="size-3.5" aria-hidden />
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {isLoading || !stats ? (
+              Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12" />)
+            ) : stats.priorityTasks.length === 0 ? (
+              <button
+                onClick={() => setTaskDialogOpen(true)}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border py-8 text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+              >
+                <Plus className="size-4" aria-hidden />
+                Aucune tâche active — en créer une ?
+              </button>
+            ) : (
+              stats.priorityTasks.map((task) => {
+                const overdue = task.dueDate && isBefore(parseISO(task.dueDate), now)
+                return (
+                  <div
+                    key={task.id}
+                    className="flex w-full items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-accent/50"
+                  >
+                    <button
+                      onClick={() => completeTask(task)}
+                      className="flex size-6 shrink-0 items-center justify-center rounded-full border border-input text-muted-foreground transition-colors hover:border-emerald-500 hover:text-emerald-500"
+                      aria-label={`Marquer « ${task.title} » comme terminée`}
+                    >
+                      <Check className="size-3.5" aria-hidden />
+                    </button>
+                    <button
+                      className="min-w-0 flex-1 text-left"
+                      onClick={() => onNavigate?.("tasks")}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <Flag
+                          className={`size-3.5 shrink-0 ${task.priority === 2 ? "text-red-500" : task.priority === 1 ? "text-primary" : "text-muted-foreground"}`}
+                          aria-hidden
+                        />
+                        <span className="truncate text-sm font-medium">{task.title}</span>
+                        {task.status === "doing" && (
+                          <Badge variant="secondary" className="px-1.5 text-[10px] font-normal">en cours</Badge>
+                        )}
+                      </span>
+                      {task.dueDate && (
+                        <span className={`block truncate text-xs ${overdue ? "font-medium text-red-500" : "text-muted-foreground"}`}>
+                          {overdue ? "En retard · " : "Échéance "}
+                          {format(parseISO(task.dueDate), "EEE d MMM · HH:mm", { locale: fr })}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                )
+              })
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ---------- Derniers emails ---------- */}
+      <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+        <CardHeader className="flex-row items-center justify-between pb-3">
+          <CardTitle className="flex items-center gap-2 text-base font-medium">
+            <Mail className="size-4 text-violet-500" aria-hidden />
+            Derniers emails
+          </CardTitle>
+          <Button variant="ghost" size="sm" className="h-8 gap-1 text-xs text-muted-foreground" onClick={() => onNavigate?.("emails")}>
+            Boîte de réception
+            <ArrowUpRight className="size-3.5" aria-hidden />
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-1">
+          {isLoading || !stats ? (
+            Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12" />)
+          ) : stats.recentEmails.length === 0 ? (
+            <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-border py-8 text-sm text-muted-foreground">
+              <Mail className="size-4" aria-hidden />
+              Aucun email — synchronisez votre boîte
+            </div>
+          ) : (
+            stats.recentEmails.map((email) => (
+              <button
+                key={email.id}
+                onClick={() => onNavigate?.("emails", email.id)}
+                className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent/50"
+              >
+                <span className={`size-2 shrink-0 rounded-full ${email.isRead ? "bg-transparent" : "bg-violet-500"}`} aria-hidden />
+                <span className="w-28 shrink-0 truncate text-xs text-muted-foreground sm:w-40">
+                  {email.fromName ?? email.fromAddress}
+                </span>
+                <span className={`min-w-0 flex-1 truncate text-sm ${email.isRead ? "font-normal" : "font-semibold"}`}>
+                  {email.subject}
+                </span>
+                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                  {format(parseISO(email.receivedAt), isToday(parseISO(email.receivedAt)) ? "HH:mm" : "d MMM", { locale: fr })}
+                </span>
+                {!email.isProcessed && (
+                  <Badge variant="outline" className="hidden gap-1 border-violet-500/30 text-[10px] text-violet-500 sm:inline-flex">
+                    <Sparkles className="size-2.5" aria-hidden />
+                    IA
+                  </Badge>
+                )}
+              </button>
+            ))
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ---------- Dialogs ---------- */}
+      <EventDialog
+        open={eventDialogOpen}
+        onOpenChange={(o) => {
+          setEventDialogOpen(o)
+          if (!o) setEditEvent(null)
+        }}
+        event={editEvent}
+        defaultDate={new Date()}
+      />
+      <TaskDialog open={taskDialogOpen} onOpenChange={setTaskDialogOpen} />
+    </div>
+  )
+}
