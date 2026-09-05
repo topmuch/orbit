@@ -15,6 +15,7 @@ model User {
   email            String             @unique
   passwordHash     String
   name             String?
+  timezone         String             @default("UTC") // Fuseau d'affichage préféré (IANA)
   preferences      Json?
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
@@ -26,20 +27,43 @@ model User {
 }
 
 model Event {
-  id             String    @id @default(cuid())
-  userId         String
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  title          String
-  description    String?
-  startTime      DateTime
-  endTime        DateTime
-  source         String    @default("manual") // manual | email_extract | ai
-  attendees      Json?
-  reminderSentAt DateTime? // horodatage du rappel « J-15 min » (nullable = pas encore notifié)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  id                  String    @id @default(cuid())
+  userId              String
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title               String
+  description         String?
+  location            String?
+
+  // Règle d'or : instants TOUJOURS stockés en UTC ; la timezone IANA de
+  // référence de l'événement est stockée à part pour l'affichage/récurrence.
+  startTime           DateTime
+  endTime             DateTime
+  allDay              Boolean   @default(false)
+  timezone            String    @default("UTC") // IANA, ex. "Europe/Paris"
+
+  // Récurrence : { frequency: "daily"|"weekly"|"monthly", interval, until?, count?, byDays?, nth? }
+  // Les occurrences sont « expansées » à la volée — jamais persistées en base.
+  recurrence          Json?
+  // Débuts (ISO UTC) des occurrences annulées/éditées séparément (exceptions de série)
+  recurrenceExceptions Json?
+
+  attendees           Json?     // [{ email, name?, status: "pending"|"accepted"|"declined" }]
+  reminders           Json?     // [{ minutes, type: "push"|"email" }] — défaut : 15 min push
+
+  color               String?   // Hex (#RRGGBB) — null = couleur automatique par source
+
+  source              String    @default("manual") // manual | email_extract | ai | import
+  externalId          String?   // UID iCal (import idempotent) / ID service externe
+
+  reminderSentAt      DateTime? // Legacy : rappel par défaut déjà envoyé (événement simple)
+  reminderLog         Json?     // Clés de rappels déjà envoyés (occurrences + multi-rappels)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@index([userId, startTime])
+  @@index([userId, endTime])
+  @@index([userId, externalId])
 }
 
 model Task {

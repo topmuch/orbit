@@ -72,6 +72,12 @@ const SOURCE_STYLES: Record<EventSource, SourceStyle> = {
     badge: "border-violet-500 bg-violet-500/15 text-violet-600 dark:text-violet-400",
     label: "IA",
   },
+  import: {
+    chip: "border-l-teal-500 bg-teal-500/15 text-teal-600 hover:bg-teal-500/25 dark:text-teal-400",
+    dot: "bg-teal-500",
+    badge: "border-teal-500 bg-teal-500/15 text-teal-600 dark:text-teal-400",
+    label: "Import",
+  },
 }
 
 const WEEKDAY_LABELS = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"] as const

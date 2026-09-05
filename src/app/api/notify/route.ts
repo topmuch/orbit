@@ -1,5 +1,5 @@
-// /api/notify — Envoi de notifications Web Push (VAPID)
-// ───────────────────────────────────────────────────────────────────────────
+// /api/notify — Envoi de notifications Web Push (VAPID) + rappels email locaux
+// ─────────────────────────────────────────────────────────────────────────────
 // Deux modes d'appel, mutuellement exclusifs :
 //
 //   1. Test utilisateur (auth par session) :
@@ -8,16 +8,25 @@
 //   2. Rappels automatiques (auth par secret de service — reminder-service :3032) :
 //      POST { "type": "reminders" } + header "x-orbit-service-secret"
 //      → scanne la base et envoie :
-//        • événements démarrant dans moins de 15 minutes
-//        • tâches non terminées dont l'échéance arrive dans moins d'1 heure
-//      Chaque objet notifié est marqué (reminderSentAt) pour éviter tout doublon.
-//      Les utilisateurs sans abonnement push ne sont PAS marqués : s'ils
-//      s'abonnent avant l'heure, ils recevront quand même leur rappel.
+//        • ÉVÉNEMENTS : rappels configurés par événement (reminders JSON,
+//          défaut 15 min push), y compris les OCCURRENCES de séries
+//          récurrentes (expansion à la volée, cf. lib/calendar.ts).
+//          type "push" → Web Push ; type "email" → EmailLog synthétique
+//          (« Orbit — rappels ») visible dans la boîte Orbit (100 % local).
+//        • TÂCHES non terminées dont l'échéance arrive dans moins d'1 heure.
+//      Anti-doublon : reminderLog (clés occurrence::minutes::type, max 200).
+//      Les utilisateurs sans appareil ne sont PAS marqués : s'ils s'abonnent
+//      avant l'heure, ils recevront quand même leur rappel.
+
 import { NextRequest, NextResponse } from "next/server"
 import { format } from "date-fns"
 import { fr } from "date-fns/locale"
 import { db } from "@/lib/db"
 import { getSessionUser } from "@/lib/auth"
+import { formatInTz } from "@/lib/timezone"
+import { expandEvent } from "@/lib/calendar"
+import { parseReminders, parseRecurrence } from "@/lib/dto"
+import type { EventReminder } from "@/lib/types"
 import {
   ensureWebPushConfigured,
   isPushConfigured,
@@ -64,8 +73,32 @@ async function notifyTest(userId: string): Promise<Response> {
 
 // ── Mode 2 : rappels automatiques (secret de service) ──────────────────────
 
-const EVENT_LEAD_MS = 15 * 60 * 1000 // 15 minutes avant un événement
 const TASK_LEAD_MS = 60 * 60 * 1000 // 1 heure avant l'échéance d'une tâche
+/** Horizon de scan : couvre les rappels configurables (jusqu'à 14 jours). */
+const LOOKAHEAD_MS = 15 * 24 * 60 * 60 * 1000
+/** Grâce après l'heure théorique d'envoi (cycle de 60 s + latence). */
+const GRACE_MS = 5 * 60 * 1000
+/** Rappel par défaut quand l'événement n'en définit aucun. */
+const DEFAULT_EVENT_REMINDERS: EventReminder[] = [{ minutes: 15, type: "push" }]
+/** Taille max du journal anti-doublon par événement. */
+const LOG_MAX = 200
+
+function parseLog(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return (raw as unknown[]).filter((s): s is string => typeof s === "string")
+}
+
+/** « Dans 15 min » / « Dans 2 h » / « Dans 3 j » */
+function humanLead(minutes: number): string {
+  if (minutes < 60) return `Dans ${minutes} min`
+  if (minutes < 1440) {
+    const h = Math.floor(minutes / 60)
+    const m = minutes % 60
+    return m ? `Dans ${h} h ${m}` : `Dans ${h} h`
+  }
+  const days = Math.floor(minutes / 1440)
+  return `Dans ${days} j`
+}
 
 async function notifyReminders(): Promise<Response> {
   if (!ensureWebPushConfigured()) {
@@ -79,37 +112,109 @@ async function notifyReminders(): Promise<Response> {
   const report: PushSendReport = { sent: 0, removed: 0, failed: 0 }
   let eventsNotified = 0
   let tasksNotified = 0
+  let emailsSent = 0
 
-  // ── Événements démarrant dans moins de 15 minutes ──────────────────────
-  // (un push par rappel, tag unique par objet → remplace au lieu d'empiler)
-  const dueEvents = await db.event.findMany({
+  // ── Événements (simples + occurrences de séries) ────────────────────────
+  const candidates = await db.event.findMany({
     where: {
-      reminderSentAt: null,
-      startTime: { gte: now, lte: new Date(now.getTime() + EVENT_LEAD_MS) },
+      startTime: { gte: new Date(now.getTime() - GRACE_MS), lte: new Date(now.getTime() + LOOKAHEAD_MS) },
     },
-    take: 50,
+    take: 200,
   })
 
-  for (const event of dueEvents) {
-    const r = await sendPushToUser(event.userId, {
-      title: "Orbit — rappel d'événement",
-      body: `Dans 15 min : ${event.title} (${format(event.startTime, "HH:mm", { locale: fr })})`,
-      tag: `event-${event.id}`,
-      kind: "event",
-    })
-    Object.assign(report, {
-      sent: report.sent + r.sent,
-      removed: report.removed + r.removed,
-      failed: report.failed + r.failed,
-    })
-    // Marqué uniquement si l'utilisateur a des appareils (sent/removed > 0) :
-    // sans abonnement, le rappel restera disponible s'il s'abonne à temps.
-    if (r.sent > 0 || r.removed > 0) {
+  for (const event of candidates) {
+    const configured = parseReminders(event.reminders)
+    // Pont legacy : événement déjà notifié par l'ancien système (reminderSentAt)
+    // et sans rappels explicites → considéré comme déjà rappelé.
+    if (!configured && event.reminderSentAt) continue
+
+    const reminders = configured ?? DEFAULT_EVENT_REMINDERS
+
+    // Occurrences à considérer : l'événement lui-même, ou l'expansion de la
+    // série dans la fenêtre de scan.
+    const occurrences = expandEvent(
+      {
+        startTime: event.startTime,
+        endTime: event.endTime,
+        allDay: event.allDay,
+        timezone: event.timezone,
+        recurrence: parseRecurrence(event.recurrence),
+        recurrenceExceptions: event.recurrenceExceptions,
+      },
+      new Date(now.getTime() - GRACE_MS),
+      new Date(now.getTime() + LOOKAHEAD_MS),
+      50
+    )
+    if (!occurrences.length) continue
+
+    const log = new Set(parseLog(event.reminderLog))
+    let dirty = false
+
+    for (const occ of occurrences) {
+      const occKey = occ.start.toISOString()
+      for (const reminder of reminders) {
+        const key = `${occKey}::${reminder.minutes}::${reminder.type}`
+        if (log.has(key)) continue
+
+        const sendAt = occ.start.getTime() - reminder.minutes * 60_000
+        if (now.getTime() < sendAt || sendAt < now.getTime() - GRACE_MS) continue
+
+        if (reminder.type === "push") {
+          const r = await sendPushToUser(event.userId, {
+            title: "Orbit — rappel d'événement",
+            body: `${humanLead(reminder.minutes)} : ${event.title} (${formatInTz(occ.start, event.timezone, { hour: "2-digit", minute: "2-digit" })})`,
+            tag: `event-${event.id}-${occKey}-${reminder.minutes}`,
+            kind: "event",
+          })
+          report.sent += r.sent
+          report.removed += r.removed
+          report.failed += r.failed
+          // Marqué uniquement si l'utilisateur a des appareils (cf. en-tête)
+          if (r.sent > 0 || r.removed > 0) {
+            log.add(key)
+            dirty = true
+            eventsNotified++
+          }
+        } else {
+          // Rappel « email » 100 % local : EmailLog synthétique dans la boîte
+          // Orbit (aucun transport SMTP — confidentialité stricte).
+          try {
+            await db.emailLog.create({
+              data: {
+                userId: event.userId,
+                messageId: `rappel-${event.id}-${occKey}-${reminder.minutes}`,
+                fromAddress: "rappels@orbit.app",
+                fromName: "Orbit — rappels",
+                subject: `Rappel : ${event.title}`,
+                bodyText: [
+                  `${humanLead(reminder.minutes)} : ${event.title}`,
+                  event.allDay
+                    ? "Journée entière"
+                    : `Le ${formatInTz(occ.start, event.timezone, { weekday: "long", day: "numeric", month: "long" })} de ${formatInTz(occ.start, event.timezone, { hour: "2-digit", minute: "2-digit" })} à ${formatInTz(occ.end, event.timezone, { hour: "2-digit", minute: "2-digit" })} (${event.timezone})`,
+                  event.location ? `Lieu : ${event.location}` : "",
+                  event.description ? `\n${event.description}` : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+                receivedAt: now,
+              },
+            })
+            log.add(key)
+            dirty = true
+            emailsSent++
+          } catch {
+            // collision messageId (déjà envoyé) → rien à faire
+          }
+        }
+      }
+    }
+
+    if (dirty) {
+      const pruned = [...log].slice(-LOG_MAX)
       await db.event.update({
         where: { id: event.id },
-        data: { reminderSentAt: now },
+        data: { reminderLog: pruned },
       })
-      eventsNotified++
     }
   }
 
@@ -130,16 +235,11 @@ async function notifyReminders(): Promise<Response> {
       tag: `task-${task.id}`,
       kind: "task",
     })
-    Object.assign(report, {
-      sent: report.sent + r.sent,
-      removed: report.removed + r.removed,
-      failed: report.failed + r.failed,
-    })
+    report.sent += r.sent
+    report.removed += r.removed
+    report.failed += r.failed
     if (r.sent > 0 || r.removed > 0) {
-      await db.task.update({
-        where: { id: task.id },
-        data: { reminderSentAt: now },
-      })
+      await db.task.update({ where: { id: task.id }, data: { reminderSentAt: now } })
       tasksNotified++
     }
   }
@@ -148,6 +248,7 @@ async function notifyReminders(): Promise<Response> {
     ok: true,
     scannedAt: now.toISOString(),
     eventsNotified,
+    emailsSent,
     tasksNotified,
     report,
   })

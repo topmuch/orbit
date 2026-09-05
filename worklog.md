@@ -273,3 +273,38 @@ Work Log:
 Stage Summary:
 - Environnement local intégralement réparé : .env original restauré depuis l'historique git (aucun secret régénéré, aucune donnée perdue), 3 services UP (:3000, :3031, :3032), DB complète
 - Local et GitHub parfaitement synchronisés sur d25915a (statut clean, 0/0)
+
+---
+Task ID: 12-a (main)
+Agent: main (Z.ai Code)
+Task: Backend complet du système d'événements étendu — fuseaux horaires UTC, récurrences expansées, participants, rappels par événement, iCal import/export, conflits, rate limiting
+
+Work Log:
+- prisma/schema.prisma : Event étendu (location, allDay, timezone IANA, color, recurrence Json, recurrenceExceptions Json, attendees Json, reminders Json, externalId, reminderLog Json, index [userId,endTime] + [userId,externalId]) + User.timezone — db:push OK, client Prisma régénéré, dev server redémarré
+- src/lib/timezone.ts (nouveau, zéro dépendance, pure Intl) : isValidTimezone, tzOffsetMs, utcToWall/wallToUtc (convention « murale » = Date dont les champs UTC contiennent l'heure locale ; arithmétique de calendrier sans dérive DST), wallToFormatable (pour date-fns), formatInTz, dayKeyInTz, startOfDayInTz, getBrowserTimezone, timezoneLabel, COMMON_TIMEZONES
+- src/lib/calendar.ts (nouveau) : expandEvent — expansion à la volée des récurrences daily/weekly(byDays)/monthly(jour du mois OU nth jour de semaine, -1 = dernier), until inclusif (date seule = fin de journée), count, exceptions filtrées, fast-forward quand pas de count, garde-fous 5000 itérations/300 occurrences ; findConflicts (chevauchement strict), clampRange (plage max 400 j), groupByDay
+- src/lib/ical.ts (nouveau) : parseIcs — dépliage de lignes, propriétés+paramètres avec guillemets, VALUE=DATE / TZID / Z, RRULE→règle Orbit (BYDAY+préfixe nth, UNTIL, COUNT), EXDATE, ATTENDEE, VALARM TRIGGER (durées ISO8601 négatives), échappement texte, couleurs COLOR/X-APPLE-CALENDAR-COLOR ; buildIcs — VCALENDAR RFC 5545 (CRLF, repli 75 octets byte-safe, DTSTAMP, UID, RRULE, EXDATE, VALARM push, ATTENDEE PARTSTAT)
+- src/lib/rate-limit.ts (nouveau) : fenêtre glissante en mémoire + balayage, tooManyRequests 429 + Retry-After
+- src/lib/events-service.ts (nouveau) : loadExpandedEvents (chargement + expansion partagés), computeConflicts, appendException, isOccurrenceOfSeries, sanitizeText, toJsonInput (Prisma.DbNull)
+- types.ts : RecurrenceRule, EventAttendee, EventReminder, EventSource +import, EventDto étendu (location/allDay/timezone/color/recurrence/attendees/reminders/externalId/isOccurrence/seriesId/occurrenceStart), EventCreateInput/EventUpdateInput (scope single|series), EventImportResult
+- validators.ts : eventCreateSchema/eventUpdateSchema complets (hexColor, tz IANA, participants ≤20, rappels ≤5 [0 min..14 j], récurrence [byDays weekly/monthly seulement, nth monthly seulement, count XOR until], refine fin>début), icsJsonSchema
+- dto.ts : toEventDto/toOccurrenceDto (occurrence virtuelle : id=master, isOccurrence, seriesId, occurrenceStart) + parseRecurrence/parseAttendees/parseReminders défensifs
+- Routes : GET/POST /api/events (plage start/end + expansion, alias legacy from/to, conflits non bloquants en réponse) ; PATCH/DELETE /api/events/[id] (scope « series » = master + reset reminderLog si heure/rappels changent ; scope « single » = exception de série + événement détaché créé) ; POST /api/events/import (multipart ou JSON, idempotent par UID — y compris round-trip de notre export via UID orbit-<id>@orbit.local, cap 1 Mo/500) ; GET /api/events/export (text/calendar, RRULE+EXDATE préservés, plage optionnelle) — toutes : auth session, ownership, rate limit, sanitize
+- /api/notify : rappels par événement (défaut 15 min push), occurrences expansées (clés occ::minutes::type, log ≤200, pont legacy reminderSentAt), type « email » → EmailLog synthétique « Orbit — rappels » dans la boîte locale (100 % privé)
+- /api/stats : ?tz=IANA, jours regroupés dans le fuseau, agenda/todayEvents/nextEvent/weekLoad EXPANSÉS (weekLoad.date = clé yyyy-MM-dd)
+- /api/profile : PATCH timezone (IANA validé) ; /api/ai/chat : agenda expansé, formatage dans le fuseau de chaque événement
+
+QA curl (tout validé) :
+- création riche (tz Paris, reminders push+email, participant) → 201 + conflit détecté (« Déjeuner avec Claire »)
+- weekly byDays [1,3] count 8 → 8 occurrences mar/jeu 10:00Z (12:00 murale Paris) — BUG de double comptage timeOfDay corrigé (wallMonday incluat déjà l'heure) ; mensuel 31 (fév/avr/juin sautés), 2e lundi (nth), until inclusif, allDay bihebdo 2 jours, DST 25 oct (murale 09:00 stable)
+- PATCH scope single → exception + événement détaché ( occurrence d'origine remplacée dans la plage) ; DELETE single → master vivant, occurrence disparue ; PATCH series → titre propagé
+- export .ics : RRULE:FREQ=WEEKLY;COUNT=8;BYDAY=TU,TH + 2×EXDATE + VALARM -PT30M + COLOR ; import du même fichier → 13/13 skipped après fix round-trip ; import externe Google-style (TZID, pliage, BYDAY=2SA, ATTENDEE CN+PARTSTAT, VALARM -PT1D, VALUE=DATE 2 jours) → 2 créés, re-import → 2 skipped
+- rappel email E2E : event +4 min, rappel 5 min → POST :3032/run → emailsSent=1, email « Dans 5 min : QA Rappel email … (Africa/Dakar) » dans la boîte, re-run → 0 (idempotent)
+- validation : titre/fin<début/couleur/tz/interval/byDays-sur-daily → messages FR ; rate limit import → 429 au 21e + Retry-After
+- stats?tz=Africa/Dakar → weekLoad clés yyyy-MM-dd correctes ; assistant → agenda expansé avec récurrences
+- bunx tsc --noEmit → 0 erreur src/ ; bun run lint → 0 erreur 0 warning ; dev.log propre
+
+Stage Summary:
+- Backend événements complet et testé : UTC en stockage, tz IANA par événement + préférence profil, récurrences expansées à la volée (jamais persistées), exceptions de série (édition/suppression d'une occurrence), conflits non bloquants, iCal import/export idempotent, rappels multi-canaux par événement, rate limiting
+- Contrats gelés pour le frontend : EventDto (isOccurrence/seriesId/occurrenceStart), GET /api/events?start&end (expansé), POST {event, conflicts}, PATCH/DELETE ?scope&occurrenceStart, POST /api/events/import (multipart|JSON), GET /api/events/export, GET /api/stats?tz=, PATCH /api/profile {timezone}
+- QA events de test en base (QA Standup, QA Sport série + détaché, QA Conseil d'administration mensuel 2e samedi, QA Séminaire allDay, QA Rappel email) — exploitables pour la QA frontend

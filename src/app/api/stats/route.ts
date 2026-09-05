@@ -1,57 +1,61 @@
 // GET /api/stats — Agrégats pour le tableau de bord
-import { NextResponse } from "next/server"
-import {
-  addDays,
-  startOfDay,
-  endOfDay,
-  startOfWeek,
-  endOfWeek,
-  endOfToday,
-  isBefore,
-} from "date-fns"
+// ─────────────────────────────────────────────────────────────────────────────
+// ?tz=IANA (optionnel) : fuseau de regroupement des jours (défaut UTC). Les
+// séries récurrentes sont EXPANSÉES (cf. lib/events-service.ts) pour que le
+// tableau de bord, la charge de semaine et le « prochain événement » reflètent
+// les occurrences réelles. weekLoad.date = clé « yyyy-MM-dd » du jour dans le
+// fuseau (à formater côté client sans reparsing Date).
+
+import { NextRequest, NextResponse } from "next/server"
+import { addDays, isBefore } from "date-fns"
 import { db } from "@/lib/db"
 import { getSessionUser } from "@/lib/auth"
-import { toEventDto, toTaskDto, toEmailDto } from "@/lib/dto"
-import type { StatsDto } from "@/lib/types"
+import { toTaskDto, toEmailDto } from "@/lib/dto"
+import { loadExpandedEvents } from "@/lib/events-service"
+import { dayKeyInTz, isValidTimezone, utcToWall } from "@/lib/timezone"
+import type { StatsDto, EventDto } from "@/lib/types"
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const user = await getSessionUser()
   if (!user) return NextResponse.json({ error: "Non authentifié" }, { status: 401 })
 
+  const tzParam = new URL(req.url).searchParams.get("tz")
+  const tz = tzParam && isValidTimezone(tzParam) ? tzParam : "UTC"
+
   const now = new Date()
 
-  const [events, tasks, emails] = await Promise.all([
-    db.event.findMany({
-      where: {
-        userId: user.id,
-        startTime: { gte: startOfWeek(now, { weekStartsOn: 1 }), lte: endOfWeek(now, { weekStartsOn: 1 }) },
-      },
-      orderBy: { startTime: "asc" },
-    }),
+  // Agenda élargi : cette semaine (UTC) + marge de 7 jours, expansions incluses
+  const [events, tasks, emails, userRow] = await Promise.all([
+    loadExpandedEvents(user.id, new Date(now.getTime() - 14 * 86_400_000), addDays(now, 21)),
     db.task.findMany({ where: { userId: user.id } }),
     db.emailLog.findMany({
       where: { userId: user.id },
       orderBy: { receivedAt: "desc" },
       take: 5,
     }),
+    db.user.findUnique({ where: { id: user.id }, select: { timezone: true } }),
   ])
 
-  // Charge de la semaine (7 jours à venir, à partir d'aujourd'hui)
+  // Fuseau de regroupement : paramètre explicite > préférence profil > UTC
+  const effectiveTz = tzParam ? tz : userRow?.timezone && isValidTimezone(userRow.timezone) ? userRow.timezone : "UTC"
+  const todayKey = dayKeyInTz(now, effectiveTz)
+
+  // Charge de la semaine (7 jours à venir, à partir d'aujourd'hui dans le fuseau)
   const weekLoad: StatsDto["weekLoad"] = []
+  const todayWall = utcToWall(now, effectiveTz)
+  const baseY = todayWall.getUTCFullYear()
+  const baseM = todayWall.getUTCMonth()
+  const baseD = todayWall.getUTCDate()
   for (let i = 0; i < 7; i++) {
-    const day = addDays(startOfDay(now), i)
-    const next = addDays(day, 1)
+    const key = new Date(Date.UTC(baseY, baseM, baseD + i)).toISOString().slice(0, 10)
     weekLoad.push({
-      date: day.toISOString(),
-      count: events.filter((e) => e.startTime >= day && e.startTime < next).length,
+      date: key,
+      count: events.filter((e) => dayKeyInTz(new Date(e.startTime), effectiveTz) === key).length,
     })
   }
 
-  const todayEvents = events.filter(
-    (e) => e.startTime >= startOfDay(now) && e.startTime <= endOfDay(now)
-  )
-  const nextEvent =
-    events.find((e) => e.startTime >= now) ?? null
+  const todayEvents = events.filter((e) => dayKeyInTz(new Date(e.startTime), effectiveTz) === todayKey)
+  const nextEvent: EventDto | null = events.find((e) => new Date(e.startTime) >= now) ?? null
 
   const pendingTasks = tasks.filter((t) => t.status !== "done")
   const priorityTasks = [...pendingTasks]
@@ -73,8 +77,8 @@ export async function GET() {
     unprocessedEmails: await db.emailLog.count({
       where: { userId: user.id, isProcessed: false },
     }),
-    nextEvent: nextEvent ? toEventDto(nextEvent) : null,
-    todayEvents: todayEvents.map(toEventDto),
+    nextEvent,
+    todayEvents,
     priorityTasks: priorityTasks.map(toTaskDto),
     recentEmails: emails.map(toEmailDto),
     weekLoad,

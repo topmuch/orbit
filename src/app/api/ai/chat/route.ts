@@ -12,6 +12,8 @@ import { db } from "@/lib/db"
 import { getSessionUser } from "@/lib/auth"
 import { chatSchema } from "@/lib/validators"
 import { chatCompletionStream } from "@/lib/ai-provider"
+import { loadExpandedEvents } from "@/lib/events-service"
+import { formatInTz } from "@/lib/timezone"
 
 export const runtime = "nodejs"
 export const maxDuration = 60
@@ -28,16 +30,13 @@ export async function POST(req: NextRequest) {
   const messages = parsed.data.messages
 
   // ---- Contexte utilisateur (agenda 7 jours + tâches en cours) ----
+  // Agenda expansé : les occurrences de séries récurrentes sont incluses,
+  // chaque événement est présenté dans SON fuseau de référence.
   const now = new Date()
   const [events, tasks] = await Promise.all([
-    db.event.findMany({
-      where: {
-        userId: user.id,
-        startTime: { gte: addDays(now, -1), lte: addDays(now, 7) },
-      },
-      orderBy: { startTime: "asc" },
-      take: 30,
-    }),
+    loadExpandedEvents(user.id, addDays(now, -1), addDays(now, 7)).then((list) =>
+      list.slice(0, 30)
+    ),
     db.task.findMany({
       where: { userId: user.id, status: { not: "done" } },
       orderBy: [{ priority: "desc" }, { dueDate: "asc" }],
@@ -46,10 +45,16 @@ export async function POST(req: NextRequest) {
   ])
 
   const agenda = events
-    .map(
-      (e) =>
-        `- ${format(e.startTime, "EEE d MMM", { locale: fr })} ${format(e.startTime, "HH:mm")}–${format(e.endTime, "HH:mm")} : ${e.title}`
-    )
+    .map((e) => {
+      const start = new Date(e.startTime)
+      const end = new Date(e.endTime)
+      const day = formatInTz(start, e.timezone, { weekday: "short", day: "numeric", month: "short" })
+      const hours = e.allDay
+        ? "journée entière"
+        : `${formatInTz(start, e.timezone, { hour: "2-digit", minute: "2-digit" })}–${formatInTz(end, e.timezone, { hour: "2-digit", minute: "2-digit" })}`
+      const tag = e.isOccurrence ? " (récurent)" : ""
+      return `- ${day} ${hours}${tag} : ${e.title}`
+    })
     .join("\n")
 
   const taches = tasks
