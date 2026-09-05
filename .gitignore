@@ -50,6 +50,11 @@ __pycache__/
 *.pid
 agent-ctx/
 
+# sandbox runtime scripts (auto-generated, not part of the app)
+tests/*.sh
+# keep the real test harness
+!tests/mock-push/
+
 # vercel
 .vercel
 
