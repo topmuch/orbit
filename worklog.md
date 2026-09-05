@@ -241,3 +241,19 @@ Stage Summary:
 - Dépôt publié : https://github.com/topmuch/orbit (public — bascule private possible en 1 requête API si souhaité)
 - Sécurité : secrets (VAPID, AUTH) et données utilisateurs (SQLite) exclus à la fois du tree ET de l'historique (squash orphelin) ; .env.example fourni comme gabarit
 - Local : environnement de dev inchangé et fonctionnel (fichiers toujours sur disque)
+
+---
+Task ID: 11 (main)
+Agent: main (Z.ai Code)
+Task: Synchronisation version locale ↔ version GitHub
+
+Work Log:
+- Diagnostic : local en avance de 1 commit (62143f5, auto-commit plateforme 01:41) qui ré-ajoutait 3 scripts sandbox (tests/database-runtime-build.sh, tests/python-runtime-build.sh, tests/python-runtime-container.sh) volontairement exclus du dépôt ; et 147 fichiers « modifiés » = UNIQUEMENT des changements de mode 644→755 (artefact chmod sandbox, 0 insertion/0 suppression — contenu identique)
+- git reset origin/main : commit auto-commit droppé, les 3 scripts restent sur disque en untracked (rien de perdu localement)
+- git config core.fileMode false (config locale) : git ignore désormais le bruit de permissions du sandbox
+- .gitignore : ajout de tests/*.sh avec exception !tests/mock-push/ (le harnais de test réel reste tracké) → statut git 100 % propre et les futurs auto-commits plateforme ne ré-incluront plus ces scripts
+- Push du commit chore a5cd476 → local et distant synchronisés (rev-list 0/0)
+
+Stage Summary:
+- État final : main local == origin/main (a5cd476), git status propre, secrets toujours absents du dépôt, fichiers sandbox/env/db intacts sur disque
+- Racine du désynchronisement identifiée et neutralisée : auto-commits plateforme + chmod 755 sandbox (core.fileMode=false)
