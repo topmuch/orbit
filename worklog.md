@@ -216,3 +216,28 @@ Stage Summary:
 - reminder-service :3032 actif (cycle 60 s, POST /run pour tests) ; production : remplacer par un cron externe (curl POST /api/notify + secret) — aucun changement applicatif
 - Limite sandbox documentée : le push réel jusqu'au navigateur exige FCM/Mozilla push + navigateur non headless ; tout le reste (chiffrement, TTL, signatures, purge, idempotence) est validé via mock HTTPS
 - Design system (Task 7-a) et QA finale non-régression (Task 8) livrés par les subagents ; dashboard mobile overflow corrigé
+
+---
+Task ID: 10 (main)
+Agent: main (Z.ai Code)
+Task: Création du dépôt GitHub topmuch/orbit et publication du code
+
+Work Log:
+- Vérification du token GitHub fourni (GET /user → compte topmuch authentifié)
+- Audit de l'index git : fichiers sensibles détectés comme trackés — .env (AUTH_SECRET, VAPID_PRIVATE_KEY, REMINDER_SERVICE_SECRET) et db/custom.db (hash de mots de passe) — plus artefacts sandbox (.zscripts/, examples/, tool-results/, download/, Caddyfile, __pycache__, tests/*.sh)
+- .gitignore durci : .env/.env.* avec exception !.env.example, db/, *.db, .zscripts/, tool-results/, download/, examples/, Caddyfile, __pycache__/, *.pyc, *.pid, agent-ctx/
+- git rm --cached des fichiers sensibles et artefacts (fichiers conservés sur disque — env/db locaux intacts, services vérifiés 200 après opération)
+- Ajouts : README.md complet (FR : présentation, fonctionnalités, architecture ASCII, démarrage rapide, docker production, structure, lien .env.example) + docs/screenshots/ (8 captures QA : dashboard sombre/clair, calendrier, kanban, emails, assistant, mobile, showcase)
+- Historique squashé en 1 commit propre via branche orpheline (13144bf) — garantit qu'AUCUN secret n'existe dans les objets git poussés (les anciens commits contenaient .env)
+- Création du dépôt via API : POST /user/repos → topmuch/orbit (public, branche main, description FR)
+- Push avec token en URL one-shot (remote configuré proprement ensuite : https://github.com/topmuch/orbit.git, sans token dans .git/config)
+
+Vérifications (API GitHub contents) :
+- .env, db/custom.db, .zscripts, tool-results → 404 (absents du dépôt — aucun secret exposé)
+- README.md, .env.example, package.json, prisma/schema.prisma, screenshots, mini-services/ai-service, docker-compose.yml → 200
+- 1 commit unique sur main à distance ; lint et services locaux inchangés (app 200, ai-service 200)
+
+Stage Summary:
+- Dépôt publié : https://github.com/topmuch/orbit (public — bascule private possible en 1 requête API si souhaité)
+- Sécurité : secrets (VAPID, AUTH) et données utilisateurs (SQLite) exclus à la fois du tree ET de l'historique (squash orphelin) ; .env.example fourni comme gabarit
+- Local : environnement de dev inchangé et fonctionnel (fichiers toujours sur disque)
