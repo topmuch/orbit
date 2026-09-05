@@ -25,6 +25,8 @@ model User {
   tags             Tag[]
   emailLogs        EmailLog[]
   pushSubscriptions PushSubscription[]
+  notifications    Notification[]
+  notificationPreference NotificationPreference?
 }
 
 model Event {
@@ -166,10 +168,81 @@ model EmailLog {
 }
 
 model PushSubscription {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  endpoint  String
-  keys      Json
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Endpoint du service push (unique : upsert par endpoint)
+  endpoint   String    @unique
+  // Clés d'encryption de la subscription : { p256dh, auth } (base64url)
+  keys       Json
+
+  // Enrichissement (télémétrie légère, 100 % locale) :
+  userAgent  String?   // User-Agent du navigateur abonné
+  platform   String?   // "desktop" | "mobile" | "tablet"
+
+  // Subscription active ? false = révoquée (permission retirée, 404/410)
+  isActive   Boolean   @default(true)
+  lastUsedAt DateTime? // dernier envoi réussi
+
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([endpoint])
+}
+
+// Préférences de notifications d'un utilisateur (une ligne par utilisateur).
+// SQLite : pas d'enum — les types sont des chaînes validées côté Zod.
+model NotificationPreference {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Types de notifications
+  eventReminder  Boolean @default(true) // rappels d'événements
+  taskDeadline   Boolean @default(true) // échéances de tâches
+  importantEmail Boolean @default(true) // emails importants flaggés par l'IA
+  aiSuggestion   Boolean @default(false) // suggestions IA (priorités…)
+
+  // Timing : avance par défaut du rappel d'événement quand l'événement
+  // n'en définit aucun (minutes — défaut 15)
+  eventReminderTime Int     @default(15)
+
+  // Heures calmes (aucune notification, sauf imminence < 15 min)
+  quietHoursEnabled Boolean @default(false)
+  quietHoursStart   String? // "22:00" (heure locale de l'utilisateur)
+  quietHoursEnd     String? // "08:00" (peut traverser minuit)
+
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Historique des notifications envoyées (centre de notifications in-app).
+// SQLite : pas d'enum — type = chaîne validée côté Zod :
+// "EVENT_REMINDER" | "TASK_DEADLINE" | "IMPORTANT_EMAIL" | "AI_SUGGESTION" | "SYSTEM" | "CUSTOM"
+model Notification {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type        String    @default("SYSTEM")
+  title       String
+  body        String
+  icon        String?
+
+  // Données supplémentaires (eventId, taskId, emailId, deep link…) :
+  // JSON filtré côté serveur (SQLite ne supporte pas path-filter Prisma).
+  data        Json?
+
+  isRead      Boolean   @default(false)
+  isSent      Boolean   @default(false) // true si au moins un push est parti
+  sentAt      DateTime?
+
+  // Pour les notifications planifiées (futur : file d'attente offline)
+  scheduledAt DateTime?
+
+  createdAt   DateTime  @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, type, createdAt])
 }

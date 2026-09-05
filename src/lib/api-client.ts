@@ -22,6 +22,8 @@ import type {
   StatsDto,
   AIPrioritySuggestion,
   AISummary,
+  NotificationDto,
+  NotificationPreferenceDto,
 } from "@/lib/types";
 
 // ---------- Fetch de base ----------
@@ -744,6 +746,13 @@ export function usePushMutations() {
         }))
 
       const json = sub.toJSON()
+      // Plateforme déduite de l'User-Agent (télémétrie légère, 100 % locale)
+      const ua = navigator.userAgent
+      const platform = /Tablet|iPad/i.test(ua)
+        ? "tablet"
+        : /Mobi|Android/i.test(ua)
+          ? "mobile"
+          : "desktop"
       return api<{ ok: boolean; subscriptions: number }>("/api/subscribe", {
         method: "POST",
         body: JSON.stringify({
@@ -752,6 +761,8 @@ export function usePushMutations() {
             p256dh: (json.keys as Record<string, string>)?.p256dh,
             auth: (json.keys as Record<string, string>)?.auth,
           },
+          userAgent: ua.slice(0, 300),
+          platform,
         }),
       })
     },
@@ -784,4 +795,95 @@ export function usePushMutations() {
   })
 
   return { enable, disable, test }
+}
+
+// ---------- Notifications (historique in-app + préférences) ----------
+
+/** Réponse de GET /api/notifications. */
+export interface NotificationListResult {
+  notifications: NotificationDto[]
+  unreadCount: number
+}
+
+/** Rafraîchissement intelligent de l'historique des notifications. */
+export function useNotifications(limit = 50) {
+  return useQuery<NotificationListResult>({
+    queryKey: ["notifications", limit],
+    queryFn: () =>
+      api<NotificationListResult>(`/api/notifications?limit=${limit}`),
+    // Poll léger : les rappels arrivent par le cycle 60 s du reminder-service.
+    refetchInterval: 60_000,
+  })
+}
+
+/** Mutations de lecture (une, plusieurs, tout). */
+export function useNotificationMutations() {
+  const qc = useQueryClient()
+  const invalidate = () =>
+    qc.invalidateQueries({ queryKey: ["notifications"] })
+
+  const markRead = useMutation({
+    mutationFn: (input: { notificationId?: string; ids?: string[]; all?: boolean }) =>
+      api<{ ok: boolean; updated: number }>("/api/notifications/mark-read", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    // Optimiste : badge et pastilles réactifs immédiatement.
+    onMutate: async (input) => {
+      await qc.cancelQueries({ queryKey: ["notifications"] })
+      const keys = qc.getQueriesData<NotificationListResult>({ queryKey: ["notifications"] })
+      for (const [key, data] of keys) {
+        if (!data) continue
+        qc.setQueryData<NotificationListResult>(key, {
+          unreadCount: input.all
+            ? 0
+            : Math.max(0, data.unreadCount - (input.ids?.length ?? (input.notificationId ? 1 : 0))),
+          notifications: data.notifications.map((n) =>
+            input.all ||
+            (input.notificationId && n.id === input.notificationId) ||
+            (input.ids && input.ids.includes(n.id))
+              ? { ...n, isRead: true }
+              : n
+          ),
+        })
+      }
+    },
+    onSettled: invalidate,
+  })
+
+  return { markRead }
+}
+
+/** Préférences de notifications (GET /api/notifications/preferences). */
+export function useNotificationPreferences() {
+  return useQuery<{ preferences: NotificationPreferenceDto }>({
+    queryKey: ["notification-preferences"],
+    queryFn: () => api<{ preferences: NotificationPreferenceDto }>("/api/notifications/preferences"),
+  })
+}
+
+/** Mise à jour partielle des préférences (PUT). */
+export function useNotificationPreferencesMutation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: Partial<NotificationPreferenceDto>) =>
+      api<{ preferences: NotificationPreferenceDto }>("/api/notifications/preferences", {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (data) => {
+      qc.setQueryData(["notification-preferences"], data)
+    },
+  })
+}
+
+/** Alerte personnalisée (POST /api/notify { type: "custom" }). */
+export function useCustomNotification() {
+  return useMutation({
+    mutationFn: (input: { title: string; body: string; tag?: string }) =>
+      api<{ ok: boolean; report: { sent: number } }>("/api/notify", {
+        method: "POST",
+        body: JSON.stringify({ type: "custom", ...input }),
+      }),
+  })
 }

@@ -2,6 +2,7 @@
 
 // Orbit — Shell applicatif : sidebar desktop + bottom nav mobile + header
 
+import { useEffect, useRef } from "react"
 import { format } from "date-fns"
 import { fr } from "date-fns/locale"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -66,6 +67,25 @@ export function AppShell({
 }) {
   const { data: emailsData } = useEmails()
   const { online, canInstall, installed } = usePwaStore()
+
+  // Deep link depuis une notification OS : le Service Worker (v3) poste
+  // { orbit: "navigate", view, … } quand l'utilisateur clique une notif
+  // pendant que l'app est ouverte (navigation SPA, sans rechargement).
+  const onNavigateRef = useRef(onNavigate)
+  useEffect(() => {
+    onNavigateRef.current = onNavigate
+  }, [onNavigate])
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return
+    const handler = (event: MessageEvent) => {
+      const data = event.data as { orbit?: string; view?: OrbitView } | null
+      if (data?.orbit === "navigate" && data.view) {
+        onNavigateRef.current(data.view)
+      }
+    }
+    navigator.serviceWorker.addEventListener("message", handler)
+    return () => navigator.serviceWorker.removeEventListener("message", handler)
+  }, [])
 
   const unread = (emailsData?.emails ?? []).filter((e) => !e.isRead).length
   const initials = (user.name ?? user.email)

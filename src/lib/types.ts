@@ -250,3 +250,39 @@ export type ChatMessage = {
 
 /** Vues navigables de l'application (navigation SPA côté client) */
 export type OrbitView = "dashboard" | "calendar" | "tasks" | "emails" | "assistant" | "settings"
+
+// ── Notifications ─────────────────────────────────────────────────────────
+
+export type NotificationType =
+  | "EVENT_REMINDER"
+  | "TASK_DEADLINE"
+  | "IMPORTANT_EMAIL"
+  | "AI_SUGGESTION"
+  | "SYSTEM"
+  | "CUSTOM"
+
+/** Vue de destination quand on clique une notification (deep link SPA). */
+export type NotificationTargetView = Extract<OrbitView, "calendar" | "tasks" | "emails">
+
+export type NotificationDto = {
+  id: string
+  type: NotificationType
+  title: string
+  body: string
+  /** Vue cible + id de l'objet (eventId/taskId/emailId) pour le deep link. */
+  data: { view?: NotificationTargetView; [key: string]: unknown } | null
+  isRead: boolean
+  isSent: boolean
+  createdAt: string // ISO
+}
+
+export type NotificationPreferenceDto = {
+  eventReminder: boolean
+  taskDeadline: boolean
+  importantEmail: boolean
+  aiSuggestion: boolean
+  eventReminderTime: number // minutes
+  quietHoursEnabled: boolean
+  quietHoursStart: string | null
+  quietHoursEnd: string | null
+}

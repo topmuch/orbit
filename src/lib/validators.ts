@@ -222,6 +222,56 @@ export const emailPatchSchema = z.object({
 export const pushSubscribeSchema = z.object({
   endpoint: z.string().url(),
   keys: z.object({ p256dh: z.string(), auth: z.string() }),
+  // Enrichissement (télémétrie légère, optionnelle)
+  userAgent: z.string().max(300).optional(),
+  platform: z.enum(["desktop", "mobile", "tablet"]).optional(),
+})
+
+// ── Notifications (historique in-app + préférences) ─────────────────────
+
+/** Types de notifications (SQLite : chaînes validées, pas d'enum SQL) */
+export const NOTIFICATION_TYPES = [
+  "EVENT_REMINDER",
+  "TASK_DEADLINE",
+  "IMPORTANT_EMAIL",
+  "AI_SUGGESTION",
+  "SYSTEM",
+  "CUSTOM",
+] as const
+export type NotificationType = (typeof NOTIFICATION_TYPES)[number]
+
+export const notificationMarkReadSchema = z.object({
+  // Un seul id, une liste, ou tout marquer lu
+  notificationId: z.string().cuid().optional(),
+  ids: z.array(z.string().cuid()).max(100).optional(),
+  all: z.boolean().optional(),
+})
+
+export const notificationPreferencesSchema = z.object({
+  eventReminder: z.boolean().optional(),
+  taskDeadline: z.boolean().optional(),
+  importantEmail: z.boolean().optional(),
+  aiSuggestion: z.boolean().optional(),
+  eventReminderTime: z.number().int().min(0).max(20160).optional(), // 0..14 j
+  quietHoursEnabled: z.boolean().optional(),
+  quietHoursStart: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Heure au format HH:MM")
+    .optional()
+    .or(z.literal("")),
+  quietHoursEnd: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Heure au format HH:MM")
+    .optional()
+    .or(z.literal("")),
+})
+
+// Notification envoyée à la demande (API de test / alertes personnalisées)
+export const notificationSendSchema = z.object({
+  title: z.string().min(1).max(100),
+  body: z.string().min(1).max(500),
+  tag: z.string().max(80).optional(),
+  data: z.record(z.string(), z.unknown()).optional(),
 })
 
 export const chatSchema = z.object({

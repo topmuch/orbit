@@ -11,7 +11,24 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import { useProfileMutation, useAuthMutations, useAIStatus, usePushStatus, usePushMutations } from "@/lib/api-client"
+import { Switch } from "@/components/ui/switch"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  useProfileMutation,
+  useAuthMutations,
+  useAIStatus,
+  usePushStatus,
+  usePushMutations,
+  useNotificationPreferences,
+  useNotificationPreferencesMutation,
+} from "@/lib/api-client"
 import { useTimezone } from "@/hooks/useTimezone"
 import { TimezoneSelector } from "@/components/orbit/timezone-selector"
 import { timezoneLabel } from "@/lib/timezone"
@@ -19,6 +36,7 @@ import { usePwaStore } from "@/lib/pwa-store"
 import { promptInstall } from "@/components/orbit/pwa-register"
 import { DesignSystemShowcase } from "@/components/orbit/design-system-showcase"
 import type { SessionUser } from "@/lib/types"
+import type { NotificationPreferenceDto } from "@/lib/types"
 import {
   User,
   Globe,
@@ -40,6 +58,11 @@ import {
   Server,
   Cpu,
   MonitorSmartphone,
+  MoonStar,
+  CalendarClock,
+  ListTodo,
+  Mail,
+  Bot,
 } from "lucide-react"
 
 export function SettingsView({ user }: { user: SessionUser }) {
@@ -294,6 +317,9 @@ export function SettingsView({ user }: { user: SessionUser }) {
           </CardContent>
         </Card>
 
+        {/* ---------- Préférences de notifications (types, timing, heures calmes) ---------- */}
+        <NotificationPreferencesCard />
+
         {/* ---------- Application ---------- */}
         <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
           <CardHeader>
@@ -416,6 +442,215 @@ export function SettingsView({ user }: { user: SessionUser }) {
           </Button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Préférences de notifications : types activés, avance par défaut des rappels
+// d'événements, heures calmes. Sauvegarde immédiate à chaque changement (PUT
+// partiel) — pas de bouton « Enregistrer », retour toast seulement en erreur.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REMINDER_OPTIONS = [
+  { value: "0", label: "À l'heure exacte" },
+  { value: "5", label: "5 minutes avant" },
+  { value: "15", label: "15 minutes avant" },
+  { value: "30", label: "30 minutes avant" },
+  { value: "60", label: "1 heure avant" },
+  { value: "1440", label: "1 jour avant" },
+]
+
+function NotificationPreferencesCard() {
+  const { data, isLoading } = useNotificationPreferences()
+  const save = useNotificationPreferencesMutation()
+  const prefs = data?.preferences
+
+  /** PUT partiel + toast en cas d'erreur (succès silencieux : UI déjà à jour). */
+  async function patch(input: Partial<NotificationPreferenceDto>) {
+    try {
+      await save.mutateAsync(input)
+    } catch (err) {
+      toast.error("Préférences non enregistrées", { description: (err as Error).message })
+    }
+  }
+
+  return (
+    <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base font-medium">
+          <MoonStar className="size-4 text-primary" aria-hidden />
+          Préférences de notifications
+        </CardTitle>
+        <CardDescription>
+          Types de rappels, avance par défaut et heures calmes.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {isLoading || !prefs ? (
+          <div className="space-y-3">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
+          </div>
+        ) : (
+          <>
+            {/* Types de notifications */}
+            <div className="space-y-3">
+              <PrefRow
+                icon={CalendarClock}
+                label="Rappels d'événements"
+                description="Avant chaque rendez-vous du calendrier"
+                checked={prefs.eventReminder}
+                disabled={save.isPending}
+                onCheckedChange={(v) => patch({ eventReminder: v })}
+              />
+              <PrefRow
+                icon={ListTodo}
+                label="Échéances de tâches"
+                description="Le jour de l'échéance et 1 h avant"
+                checked={prefs.taskDeadline}
+                disabled={save.isPending}
+                onCheckedChange={(v) => patch({ taskDeadline: v })}
+              />
+              <PrefRow
+                icon={Mail}
+                label="Emails importants"
+                description="Quand l'IA détecte un rendez-vous dans un email"
+                checked={prefs.importantEmail}
+                disabled={save.isPending}
+                onCheckedChange={(v) => patch({ importantEmail: v })}
+              />
+              <PrefRow
+                icon={Bot}
+                label="Suggestions IA"
+                description="Priorités suggérées pour vos tâches"
+                checked={prefs.aiSuggestion}
+                disabled={save.isPending}
+                onCheckedChange={(v) => patch({ aiSuggestion: v })}
+              />
+            </div>
+
+            <Separator />
+
+            {/* Timing par défaut des rappels d'événement */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <Label className="text-sm">Avance par défaut des rappels</Label>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Pour les événements sans rappel personnalisé
+                </p>
+              </div>
+              <Select
+                value={String(prefs.eventReminderTime)}
+                onValueChange={(v) => patch({ eventReminderTime: Number(v) })}
+                disabled={save.isPending}
+              >
+                <SelectTrigger className="w-44" aria-label="Avance par défaut des rappels">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {REMINDER_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Separator />
+
+            {/* Heures calmes */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <Label className="text-sm">Heures calmes</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Aucune notification la nuit — sauf rendez-vous imminent
+                    (&lt; 15 min) que vous ne manquerez jamais.
+                  </p>
+                </div>
+                <Switch
+                  checked={prefs.quietHoursEnabled}
+                  onCheckedChange={(v) =>
+                    patch({
+                      quietHoursEnabled: v,
+                      ...(v && !prefs.quietHoursStart && !prefs.quietHoursEnd
+                        ? { quietHoursStart: "22:00", quietHoursEnd: "08:00" }
+                        : {}),
+                    })
+                  }
+                  disabled={save.isPending}
+                  aria-label="Activer les heures calmes"
+                />
+              </div>
+              {prefs.quietHoursEnabled && (
+                <div className="grid grid-cols-2 gap-3 pl-1">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="quiet-start" className="text-xs">Début</Label>
+                    <Input
+                      id="quiet-start"
+                      type="time"
+                      value={prefs.quietHoursStart ?? ""}
+                      onChange={(e) =>
+                        patch({ quietHoursStart: e.target.value })
+                      }
+                      disabled={save.isPending}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="quiet-end" className="text-xs">Fin</Label>
+                    <Input
+                      id="quiet-end"
+                      type="time"
+                      value={prefs.quietHoursEnd ?? ""}
+                      onChange={(e) => patch({ quietHoursEnd: e.target.value })}
+                      disabled={save.isPending}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function PrefRow({
+  icon: Icon,
+  label,
+  description,
+  checked,
+  disabled,
+  onCheckedChange,
+}: {
+  icon: React.ElementType
+  label: string
+  description: string
+  checked: boolean
+  disabled?: boolean
+  onCheckedChange: (checked: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+          <Icon className="size-4 text-muted-foreground" aria-hidden />
+        </span>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">{label}</p>
+          <p className="text-xs text-muted-foreground">{description}</p>
+        </div>
+      </div>
+      <Switch
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        disabled={disabled}
+        aria-label={label}
+      />
     </div>
   )
 }

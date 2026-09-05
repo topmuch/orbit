@@ -64,15 +64,17 @@ async function runReminderCycle() {
     const data = (await res.json()) as {
       eventsNotified?: number
       tasksNotified?: number
+      emailsNotified?: number
+      quietBlocked?: number
       report?: { sent?: number; removed?: number; failed?: number }
     }
     lastResult = data
     lastRunAt = new Date().toISOString()
-    const notified = (data.eventsNotified ?? 0) + (data.tasksNotified ?? 0)
+    const notified = (data.eventsNotified ?? 0) + (data.tasksNotified ?? 0) + (data.emailsNotified ?? 0)
     const sent = data.report?.sent ?? 0
     if (notified > 0 || sent > 0) {
       console.log(
-        `[orbit:reminder] cycle #${runCount} → ${data.eventsNotified ?? 0} événement(s), ${data.tasksNotified ?? 0} tâche(s) notifié(s), ${sent} push envoyé(s)`
+        `[orbit:reminder] cycle #${runCount} → ${data.eventsNotified ?? 0} événement(s), ${data.tasksNotified ?? 0} tâche(s), ${data.emailsNotified ?? 0} email(s) IA notifié(s), ${sent} push envoyé(s)${data.quietBlocked ? `, ${data.quietBlocked} bloqué(s) par les heures calmes` : ""}`
       )
     }
   } catch (error) {

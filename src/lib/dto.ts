@@ -190,3 +190,58 @@ export function toEmailDto(e: EmailLog): EmailDto {
     suggestedEvent: suggested,
   }
 }
+
+// ── Notifications (historique + préférences) ────────────────────────────────
+
+import type { Notification, NotificationPreference } from "@prisma/client"
+import type { NotificationDto, NotificationPreferenceDto, NotificationTargetView, NotificationType } from "@/lib/types"
+
+const NOTIF_TYPES: readonly string[] = [
+  "EVENT_REMINDER",
+  "TASK_DEADLINE",
+  "IMPORTANT_EMAIL",
+  "AI_SUGGESTION",
+  "SYSTEM",
+  "CUSTOM",
+]
+const NOTIF_VIEWS: readonly string[] = ["calendar", "tasks", "emails"]
+
+/**
+ * Notification → DTO. Le champ data est BLANCHI : seuls view + les ids
+ * utiles au deep link (eventId/taskId/emailId/notificationId) sont exposés —
+ * jamais de contenu arbitraire vers le client.
+ */
+export function toNotificationDto(n: Notification): NotificationDto {
+  const raw = (n.data ?? {}) as Record<string, unknown>
+  const data: NotificationDto["data"] = {}
+  if (typeof raw.view === "string" && NOTIF_VIEWS.includes(raw.view)) {
+    data.view = raw.view as NotificationTargetView
+  }
+  for (const key of ["eventId", "taskId", "emailId", "notificationId"]) {
+    if (typeof raw[key] === "string") data[key] = raw[key]
+  }
+  return {
+    id: n.id,
+    type: (NOTIF_TYPES.includes(n.type) ? n.type : "SYSTEM") as NotificationType,
+    title: n.title,
+    body: n.body,
+    data: Object.keys(data).length ? data : null,
+    isRead: n.isRead,
+    isSent: n.isSent,
+    createdAt: n.createdAt.toISOString(),
+  }
+}
+
+/** Préférences → DTO (heures calmes nettoyées). */
+export function toNotificationPreferenceDto(p: NotificationPreference): NotificationPreferenceDto {
+  return {
+    eventReminder: p.eventReminder,
+    taskDeadline: p.taskDeadline,
+    importantEmail: p.importantEmail,
+    aiSuggestion: p.aiSuggestion,
+    eventReminderTime: p.eventReminderTime,
+    quietHoursEnabled: p.quietHoursEnabled,
+    quietHoursStart: typeof p.quietHoursStart === "string" ? p.quietHoursStart : null,
+    quietHoursEnd: typeof p.quietHoursEnd === "string" ? p.quietHoursEnd : null,
+  }
+}
