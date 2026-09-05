@@ -1,62 +1,29 @@
 "use client";
 
-/**
- * Orbit — Vue Tâches (Kanban)
- *
- * 3 colonnes « À faire / En cours / Terminé » avec drag & drop (dnd-kit),
- * mise à jour optimiste du cache React Query, recherche instantanée,
- * création/édition via TaskDialog et suppression confirmée via AlertDialog.
- */
+// Orbit — Vue Tâches (orchestrateur) : Kanban + vue liste + stats + filtres.
+// ─────────────────────────────────────────────────────────────────────────────
+// Layout : toolbar (TaskFilters à gauche ; ToggleGroup Kanban/Liste, bouton
+// Tags, toggle « Archivées », bouton « Nouvelle tâche » à droite), bandeau
+// TaskStats TOUJOURS visible (compact), puis TaskBoard OU TaskListView.
+// Dialogs montés ici : TaskModal (création/édition), TagManager, AlertDialog
+// de suppression. Les mutations optimistes (archiver/désarchiver/supprimer)
+// suivent le pattern maison : snapshot structuredClone → setQueryData ciblé →
+// rollback + toast en cas d'erreur. Le drag & drop (move) vit dans TaskBoard.
 
-import { useMemo, useRef, useState } from "react";
-import type {
-  MouseEvent as ReactMouseEvent,
-  PointerEvent as ReactPointerEvent,
-} from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react"
+import { addDays } from "date-fns"
+import { useQueryClient } from "@tanstack/react-query"
 import {
-  DndContext,
-  DragOverlay,
-  KeyboardSensor,
-  PointerSensor,
-  pointerWithin,
-  rectIntersection,
-  useDroppable,
-  useSensor,
-  useSensors,
-  type CollisionDetection,
-  type DragEndEvent,
-  type DragStartEvent,
-  type DraggableAttributes,
-  type DraggableSyntheticListeners,
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { format, isBefore } from "date-fns";
-import { fr } from "date-fns/locale";
-import { toast } from "sonner";
-import {
-  CalendarClock,
-  CheckCircle2,
-  Circle,
-  Flag,
-  GripVertical,
-  Inbox,
+  KanbanSquare,
   ListTodo,
   Loader2,
-  MoreVertical,
-  Pencil,
   Plus,
-  Search,
-  Sparkles,
-  Timer,
+  RefreshCw,
+  Table,
+  Tag as TagIcon,
   Trash2,
-  type LucideIcon,
-} from "lucide-react";
+} from "lucide-react"
+import { toast } from "sonner"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -66,134 +33,45 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+} from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Switch } from "@/components/ui/switch"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { Label } from "@/components/ui/label"
+import { TASK_STATUS_LABELS } from "@/lib/tasks"
 import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  useEvents,
+  useTags,
+  useTaskMutations,
+  useTasks,
+  type TaskListResult,
+} from "@/lib/api-client"
+import type { TaskDto, TaskStatus } from "@/lib/types"
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
-import { TaskDialog } from "@/components/orbit/task-dialog";
-import { useTaskMutations, useTasks } from "@/lib/api-client";
-import type { TaskDto, TaskStatus } from "@/lib/types";
-import { cn } from "@/lib/utils";
-
-// ---------- Constantes ----------
-
-type ColumnDef = {
-  id: TaskStatus;
-  label: string;
-  emptyLabel: string;
-  icon: LucideIcon;
-  pillClassName: string;
-  badgeClassName: string;
-};
-
-const COLUMNS: ColumnDef[] = [
-  {
-    id: "todo",
-    label: "À faire",
-    emptyLabel: "Glissez une tâche ici",
-    icon: Circle,
-    pillClassName: "bg-foreground/10 text-foreground/70",
-    badgeClassName: "border-foreground/15 bg-foreground/5 text-foreground/80",
-  },
-  {
-    id: "doing",
-    label: "En cours",
-    emptyLabel: "Glissez une tâche ici",
-    icon: Timer,
-    pillClassName: "bg-primary/15 text-primary animate-pulse",
-    badgeClassName: "border-primary/30 bg-primary/10 text-primary",
-  },
-  {
-    id: "done",
-    label: "Terminé",
-    emptyLabel: "Rien de terminé",
-    icon: CheckCircle2,
-    pillClassName: "bg-emerald-500/15 text-emerald-500",
-    badgeClassName: "border-emerald-500/30 bg-emerald-500/10 text-emerald-500",
-  },
-];
-
-const PRIORITY_META: Record<number, { label: string; className: string }> = {
-  0: { label: "Priorité basse", className: "text-muted-foreground" },
-  1: { label: "Priorité moyenne", className: "text-primary" },
-  2: { label: "Priorité haute", className: "text-red-500" },
-};
-const PRIORITY_FALLBACK = {
-  label: "Priorité inconnue",
-  className: "text-muted-foreground",
-};
-
-/** Élargit la zone cliquable des petits boutons (~48px) sans gonfler le design. */
-const HIT_AREA =
-  "relative before:absolute before:-inset-2 before:rounded-md before:content-['']";
-
-/** Seuil (px) au-delà duquel un pointerdown+click est considéré comme un drag. */
-const DRAG_CLICK_THRESHOLD = 6;
-
-/** Collision : priorité à ce qui est sous le curseur, sinon intersection géométrique. */
-const collisionDetection: CollisionDetection = (args) => {
-  const pointerCollisions = pointerWithin(args);
-  return pointerCollisions.length > 0
-    ? pointerCollisions
-    : rectIntersection(args);
-};
-
-// ---------- Utilitaires ----------
-
-/** Recherche insensible à la casse et aux accents (É → e). */
-function fold(value: string): string {
-  return value
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
+  EMPTY_TASK_FILTERS,
+  TaskFilters,
+  countActiveFilters,
+  filterTasks,
+} from "@/components/orbit/tasks/task-filters"
+import { TaskBoard } from "@/components/orbit/tasks/task-board"
+import { TaskListView } from "@/components/orbit/tasks/task-list-view"
+import { TaskStats } from "@/components/orbit/tasks/task-stats"
+import { TaskModal } from "@/components/orbit/tasks/task-modal"
+import { TagManager } from "@/components/orbit/tasks/tag-manager"
 
 function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : "Une erreur est survenue";
+  return err instanceof Error ? err.message : "Une erreur est survenue"
 }
 
-/** Ordre stable : priorité décroissante, échéance la plus proche, plus récente. */
-function compareTasks(a: TaskDto, b: TaskDto): number {
-  if (b.priority !== a.priority) return b.priority - a.priority;
-  const aDue = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
-  const bDue = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
-  if (aDue !== bDue) return aDue - bDue;
-  return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-}
+/** Vue d'affichage (toggle de la toolbar). */
+type TasksViewMode = "kanban" | "list"
 
-/** Regroupe et trie les tâches par statut (défensif si un statut inconnu arrive). */
-function groupByStatus(list: TaskDto[]): Record<TaskStatus, TaskDto[]> {
-  const groups: Record<TaskStatus, TaskDto[]> = {
-    todo: [],
-    doing: [],
-    done: [],
-  };
-  for (const task of list) {
-    if (task.status in groups) groups[task.status].push(task);
-  }
-  for (const status of Object.keys(groups) as TaskStatus[]) {
-    groups[status].sort(compareTasks);
-  }
-  return groups;
-}
-
-// ---------- Sous-composants ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// Skeletons
+// ─────────────────────────────────────────────────────────────────────────────
 
 function ColumnSkeleton() {
   return (
@@ -209,8 +87,33 @@ function ColumnSkeleton() {
         ))}
       </CardContent>
     </Card>
-  );
+  )
 }
+
+function BoardSkeleton() {
+  return (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3" role="status" aria-label="Chargement des tâches">
+      {Array.from({ length: 3 }, (_, i) => (
+        <ColumnSkeleton key={i} />
+      ))}
+    </div>
+  )
+}
+
+function TableSkeleton() {
+  return (
+    <div className="space-y-2 rounded-xl border border-border/60 bg-card/60 p-4" role="status" aria-label="Chargement des tâches">
+      <Skeleton className="h-9 w-full" />
+      {Array.from({ length: 6 }, (_, i) => (
+        <Skeleton key={i} className="h-12 w-full" />
+      ))}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Empty states
+// ─────────────────────────────────────────────────────────────────────────────
 
 function GlobalEmptyState({ onCreate }: { onCreate: () => void }) {
   return (
@@ -230,511 +133,220 @@ function GlobalEmptyState({ onCreate }: { onCreate: () => void }) {
         Créer ma première tâche
       </Button>
     </Card>
-  );
+  )
 }
 
-type TaskCardContentProps = {
-  task: TaskDto;
-  /** Attributs/listeners dnd-kit — absents pour la version rendue dans le DragOverlay. */
-  attributes?: DraggableAttributes;
-  listeners?: DraggableSyntheticListeners;
-  overlay?: boolean;
-  onEdit?: (task: TaskDto) => void;
-  onMove?: (task: TaskDto, status: TaskStatus) => void;
-  onDelete?: (task: TaskDto) => void;
-};
-
-/** Rendu visuel d'une carte (utilisé en place et dans le DragOverlay). */
-function TaskCardContent({
-  task,
-  attributes,
-  listeners,
-  overlay = false,
-  onEdit,
-  onMove,
-  onDelete,
-}: TaskCardContentProps) {
-  const interactive = !overlay;
-  const pointerDown = useRef<{ x: number; y: number } | null>(null);
-
-  const priority = PRIORITY_META[task.priority] ?? PRIORITY_FALLBACK;
-  const dueDate = task.dueDate ? new Date(task.dueDate) : null;
-  const overdue = dueDate !== null && isBefore(dueDate, new Date());
-
-  /** Enregistre le point de départ puis transmet le pointerdown à dnd-kit. */
-  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    pointerDown.current = { x: event.clientX, y: event.clientY };
-    listeners?.onPointerDown?.(event);
-  };
-
-  /** Ouvre l'édition au clic simple, mais ignore les clics issus d'un drag. */
-  const handleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    const origin = pointerDown.current;
-    pointerDown.current = null;
-    if (
-      origin &&
-      (Math.abs(event.clientX - origin.x) > DRAG_CLICK_THRESHOLD ||
-        Math.abs(event.clientY - origin.y) > DRAG_CLICK_THRESHOLD)
-    ) {
-      return; // il s'agissait d'un déplacement, pas d'un clic
-    }
-    onEdit?.(task);
-  };
-
+function FilteredEmptyState({ onReset }: { onReset: () => void }) {
   return (
-    <div
-      {...(interactive ? attributes : undefined)}
-      {...(interactive ? listeners : undefined)}
-      onPointerDown={interactive ? handlePointerDown : undefined}
-      onClick={interactive ? handleClick : undefined}
-      className={cn(
-        "group/card relative rounded-lg border bg-card p-3 text-left shadow-xs transition-[border-color,box-shadow,opacity,transform] duration-150",
-        interactive
-          ? "cursor-grab select-none hover:border-primary/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
-          : "pointer-events-none cursor-grabbing rotate-2 scale-[1.02] border-primary/60 shadow-2xl shadow-black/40",
-        task.status === "done" && "opacity-75",
-      )}
-    >
-      {/* Ligne 1 : priorité, titre, menu contextuel */}
-      <div className="flex items-start gap-2">
-        <Flag
-          className={cn("mt-0.5 size-3.5 shrink-0", priority.className)}
-          aria-hidden="true"
-        />
-        <span className="sr-only">{priority.label}.</span>
-        <span
-          className={cn(
-            "min-w-0 flex-1 text-sm font-medium leading-snug",
-            task.status === "done" &&
-              "text-muted-foreground line-through decoration-muted-foreground/60",
-          )}
-        >
-          {task.title}
-        </span>
-
-        {interactive ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  HIT_AREA,
-                  "-m-1 size-8 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground",
-                )}
-                onClick={(event) => event.stopPropagation()}
-                aria-label={`Actions pour la tâche « ${task.title} »`}
-              >
-                <MoreVertical className="size-4" aria-hidden="true" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-52">
-              <DropdownMenuLabel>Déplacer vers</DropdownMenuLabel>
-              {COLUMNS.map((column) => {
-                const MoveIcon = column.icon;
-                return (
-                  <DropdownMenuItem
-                    key={column.id}
-                    disabled={column.id === task.status}
-                    onClick={() => onMove?.(task, column.id)}
-                  >
-                    <MoveIcon
-                      className={cn(
-                        "size-4",
-                        column.id === task.status && "text-muted-foreground",
-                      )}
-                      aria-hidden="true"
-                    />
-                    {column.label}
-                    {column.id === task.status ? (
-                      <span className="ml-auto text-[10px] text-muted-foreground">
-                        actuelle
-                      </span>
-                    ) : null}
-                  </DropdownMenuItem>
-                );
-              })}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => onEdit?.(task)}>
-                <Pencil className="size-4" aria-hidden="true" />
-                Modifier
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                variant="destructive"
-                onClick={() => onDelete?.(task)}
-              >
-                <Trash2 className="size-4" aria-hidden="true" />
-                Supprimer
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
-      </div>
-
-      {/* Description tronquée sur une ligne */}
-      {task.description ? (
-        <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-          {task.description}
-        </p>
-      ) : null}
-
-      {/* Métadonnées : échéance, badge IA, poignée de saisie */}
-      <div className="mt-2.5 flex items-center gap-2 text-xs">
-        {dueDate ? (
-          <span
-            className={cn(
-              "inline-flex items-center gap-1 font-medium tabular-nums",
-              overdue ? "text-red-500" : "text-muted-foreground",
-            )}
-            title={format(dueDate, "EEEE d MMMM 'à' HH:mm", { locale: fr })}
-          >
-            <CalendarClock className="size-3.5" aria-hidden="true" />
-            {format(dueDate, "d MMM · HH:mm", { locale: fr })}
-          </span>
-        ) : null}
-
-        {task.aiPriority !== null ? (
-          <Badge
-            variant="outline"
-            className="gap-1 border-purple-500/40 bg-purple-500/10 px-1.5 text-[10px] font-medium text-purple-400"
-            title={`Priorité estimée par l'IA : ${task.aiPriority}`}
-          >
-            <Sparkles className="size-3" aria-hidden="true" />
-            IA
-          </Badge>
-        ) : null}
-
-        <GripVertical
-          className={cn(
-            "ml-auto size-4 shrink-0 text-muted-foreground transition-opacity",
-            interactive
-              ? "opacity-0 group-hover/card:opacity-70"
-              : "opacity-70",
-          )}
-          aria-hidden="true"
-        />
-      </div>
-    </div>
-  );
+    <Card className="mx-auto flex w-full max-w-md flex-col items-center gap-3 rounded-xl bg-card/60 p-6 text-center">
+      <p className="text-sm text-muted-foreground">
+        Aucune tâche ne correspond aux filtres.
+      </p>
+      <Button variant="outline" size="sm" className="gap-1.5" onClick={onReset}>
+        Réinitialiser les filtres
+      </Button>
+    </Card>
+  )
 }
 
-type TaskCardProps = {
-  task: TaskDto;
-  onEdit: (task: TaskDto) => void;
-  onMove: (task: TaskDto, status: TaskStatus) => void;
-  onDelete: (task: TaskDto) => void;
-};
-
-/** Carte sortable (dans une colonne du Kanban). */
-function TaskCard({ task, onEdit, onMove, onDelete }: TaskCardProps) {
-  const { attributes, isDragging, listeners, setNodeRef } = useSortable({
-    id: task.id,
-    data: { type: "task", column: task.status },
-  });
-
-  return (
-    <li ref={setNodeRef} className={cn(isDragging && "opacity-40")}>
-      <TaskCardContent
-        task={task}
-        attributes={attributes}
-        listeners={listeners}
-        onEdit={onEdit}
-        onMove={onMove}
-        onDelete={onDelete}
-      />
-    </li>
-  );
-}
-
-type KanbanColumnProps = {
-  column: ColumnDef;
-  tasks: TaskDto[];
-  onEdit: (task: TaskDto) => void;
-  onMove: (task: TaskDto, status: TaskStatus) => void;
-  onDelete: (task: TaskDto) => void;
-  onCreate: (status: TaskStatus) => void;
-};
-
-/** Colonne droppable du Kanban (accepte le drop même vide). */
-function KanbanColumn({
-  column,
-  tasks,
-  onEdit,
-  onMove,
-  onDelete,
-  onCreate,
-}: KanbanColumnProps) {
-  const { isOver, setNodeRef } = useDroppable({
-    id: column.id,
-    data: { type: "column", column: column.id },
-  });
-  const ColumnIcon = column.icon;
-
-  return (
-    <div ref={setNodeRef} className="flex h-full">
-      <Card
-        className={cn(
-          "h-full w-full gap-0 rounded-xl border-border/60 bg-muted/40 py-0 transition-colors",
-          isOver && "border-primary/50 bg-primary/5",
-        )}
-      >
-        <CardHeader className="flex-row items-center gap-2 p-3 pb-2">
-          <span
-            className={cn(
-              "flex size-6 shrink-0 items-center justify-center rounded-full",
-              column.pillClassName,
-            )}
-            aria-hidden="true"
-          >
-            <ColumnIcon className="size-3.5" />
-          </span>
-          <CardTitle className="text-sm font-medium">
-            {column.label}
-          </CardTitle>
-          <Badge
-            variant="outline"
-            className={cn("ml-1 tabular-nums", column.badgeClassName)}
-            aria-label={`${tasks.length} ${tasks.length > 1 ? "tâches" : "tâche"}`}
-          >
-            {tasks.length}
-          </Badge>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className={cn(
-              HIT_AREA,
-              "-m-1 ml-auto size-8 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-primary",
-            )}
-            onClick={() => onCreate(column.id)}
-            aria-label={`Ajouter une tâche dans « ${column.label} »`}
-          >
-            <Plus className="size-4" aria-hidden="true" />
-          </Button>
-        </CardHeader>
-
-        <CardContent className="p-2 pt-0">
-          <ScrollArea className="md:max-h-[70vh]">
-            <SortableContext
-              items={tasks.map((task) => task.id)}
-              strategy={verticalListSortingStrategy}
-            >
-              <ul className="flex flex-col gap-2 pb-0.5 pr-0.5">
-                {tasks.map((task) => (
-                  <TaskCard
-                    key={task.id}
-                    task={task}
-                    onEdit={onEdit}
-                    onMove={onMove}
-                    onDelete={onDelete}
-                  />
-                ))}
-                {tasks.length === 0 ? (
-                  <li className="pointer-events-none flex min-h-24 flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed border-muted-foreground/25 p-4 text-center">
-                    <Inbox
-                      className="size-4 text-muted-foreground/60"
-                      aria-hidden="true"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {column.emptyLabel}
-                    </p>
-                  </li>
-                ) : null}
-              </ul>
-            </SortableContext>
-          </ScrollArea>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-// ---------- Vue principale ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// Vue principale
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function TasksView() {
-  const { data, isLoading } = useTasks();
-  const { update, remove } = useTaskMutations();
-  const qc = useQueryClient();
+  const { data, isLoading, isError, error, refetch } = useTasks()
+  const { update, archive, removeHard } = useTaskMutations()
+  const { data: tagsData } = useTags()
+  const qc = useQueryClient()
 
-  const [search, setSearch] = useState("");
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingTask, setEditingTask] = useState<TaskDto | null>(null);
-  const [dialogStatus, setDialogStatus] = useState<TaskStatus>("todo");
-  const [taskToDelete, setTaskToDelete] = useState<TaskDto | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
-  const [activeTask, setActiveTask] = useState<TaskDto | null>(null);
-  const [activeWidth, setActiveWidth] = useState<number | null>(null);
+  // Titres d'événements (tooltips « tâche liée à un événement » des cartes).
+  // Plage STABLE au montage : `new Date()` à chaque render changerait la
+  // queryKey (millisecondes) et déclencherait une boucle de refetch.
+  const [eventsFrom, eventsTo] = useMemo(
+    () => [addDays(new Date(), -60), addDays(new Date(), 180)],
+    []
+  )
+  const { data: eventsData } = useEvents(eventsFrom, eventsTo)
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { distance: 6 },
-    }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
-  );
+  const [viewMode, setViewMode] = useState<TasksViewMode>("kanban")
+  const [showArchived, setShowArchived] = useState(false)
+  const [filters, setFilters] = useState(EMPTY_TASK_FILTERS)
 
-  const tasks = useMemo(() => data?.tasks ?? [], [data]);
+  const [modalOpen, setModalOpen] = useState(false)
+  const [editingTask, setEditingTask] = useState<TaskDto | null>(null)
+  const [modalStatus, setModalStatus] = useState<TaskStatus>("todo")
+  const [tagManagerOpen, setTagManagerOpen] = useState(false)
+  const [taskToDelete, setTaskToDelete] = useState<TaskDto | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
 
-  const filtered = useMemo(() => {
-    const query = fold(search.trim());
-    if (!query) return tasks;
-    return tasks.filter(
-      (task) =>
-        fold(task.title).includes(query) ||
-        fold(task.description ?? "").includes(query),
-    );
-  }, [tasks, search]);
+  const tasks = useMemo(() => data?.tasks ?? [], [data])
 
-  const byStatus = useMemo(() => groupByStatus(tasks), [tasks]);
+  /** Tâches visibles : archivées exclues (sauf toggle) + filtres clients. */
+  const visibleTasks = useMemo(() => {
+    const base = showArchived ? tasks : tasks.filter((t) => t.status !== "archived")
+    return filterTasks(base, filters)
+  }, [tasks, showArchived, filters])
 
-  const visibleByStatus = useMemo(
-    () => groupByStatus(filtered),
-    [filtered],
-  );
+  const archivedCount = useMemo(
+    () => tasks.filter((t) => t.status === "archived").length,
+    [tasks]
+  )
 
-  const doingCount = byStatus.doing.length;
-  const doneCount = byStatus.done.length;
+  /** eventId → titre (première occurrence). */
+  const eventTitles = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const ev of eventsData?.events ?? []) {
+      if (!map[ev.id]) map[ev.id] = ev.title
+    }
+    return map
+  }, [eventsData])
 
   // ----- Dialogs -----
 
   const openCreate = (status: TaskStatus) => {
-    setEditingTask(null);
-    setDialogStatus(status);
-    setDialogOpen(true);
-  };
+    setEditingTask(null)
+    setModalStatus(status)
+    setModalOpen(true)
+  }
 
   const openEdit = (task: TaskDto) => {
-    setEditingTask(task);
-    setDialogStatus(task.status);
-    setDialogOpen(true);
-  };
+    setEditingTask(task)
+    setModalStatus(task.status)
+    setModalOpen(true)
+  }
 
-  // ----- Mutations optimistes -----
+  // ----- Mutations optimistes (archiver / désarchiver / supprimer) -----
 
-  /** Déplace une tâche (drag, menu « Déplacer vers ») avec MAJ optimiste du cache. */
-  const moveTask = async (task: TaskDto, status: TaskStatus) => {
-    if (task.status === status) return;
-    qc.setQueryData(["tasks"], (old: { tasks: TaskDto[] } | undefined) =>
+  /** Snapshot du cache avant écriture optimiste (rollback). */
+  const snapshotTasks = (): TaskListResult | undefined =>
+    structuredClone(qc.getQueryData<TaskListResult>(["tasks"]))
+
+  /** Archiver (DELETE soft) / Désarchiver (PATCH status=todo) — optimiste. */
+  const toggleArchive = async (task: TaskDto) => {
+    const archiving = task.status !== "archived"
+    const nextStatus: TaskStatus = archiving ? "archived" : "todo"
+    const snap = snapshotTasks()
+    qc.setQueryData<TaskListResult>(["tasks"], (old) =>
       old
         ? {
-            tasks: old.tasks.map((t) =>
-              t.id === task.id ? { ...t, status } : t,
-            ),
+            ...old,
+            tasks: old.tasks.map((t) => (t.id === task.id ? { ...t, status: nextStatus } : t)),
           }
-        : old,
-    );
+        : old
+    )
     try {
-      await update.mutateAsync({ id: task.id, input: { status } });
-      qc.invalidateQueries({ queryKey: ["tasks"] });
+      if (archiving) {
+        await archive.mutateAsync(task.id)
+        toast.success("Tâche archivée", {
+          description: `« ${task.title} » est conservée dans la colonne Archivé.`,
+        })
+      } else {
+        await update.mutateAsync({ id: task.id, input: { status: "todo" } })
+        toast.success("Tâche désarchivée", {
+          description: `« ${task.title} » est de retour dans « ${TASK_STATUS_LABELS.todo} ».`,
+        })
+      }
     } catch (err) {
-      qc.invalidateQueries({ queryKey: ["tasks"] });
-      toast.error("Déplacement impossible", {
+      if (snap) qc.setQueryData(["tasks"], snap)
+      else qc.invalidateQueries({ queryKey: ["tasks"] })
+      toast.error(archiving ? "Archivage impossible" : "Désarchivage impossible", {
         description: errMessage(err),
-      });
+      })
     }
-  };
+  }
 
+  /** Suppression DÉFINITIVE (hard=1) — optimiste + confirmation en amont. */
   const deleteTask = async (task: TaskDto) => {
-    setIsDeleting(true);
-    qc.setQueryData(["tasks"], (old: { tasks: TaskDto[] } | undefined) =>
-      old ? { tasks: old.tasks.filter((t) => t.id !== task.id) } : old,
-    );
+    setIsDeleting(true)
+    const snap = snapshotTasks()
+    qc.setQueryData<TaskListResult>(["tasks"], (old) =>
+      old ? { ...old, tasks: old.tasks.filter((t) => t.id !== task.id) } : old
+    )
     try {
-      await remove.mutateAsync(task.id);
-      qc.invalidateQueries({ queryKey: ["tasks"] });
+      await removeHard.mutateAsync(task.id)
       toast.success("Tâche supprimée", {
-        description: `« ${task.title} » a été supprimée.`,
-      });
-      setTaskToDelete(null);
+        description: `« ${task.title} » a été définitivement supprimée.`,
+      })
+      setTaskToDelete(null)
     } catch (err) {
-      qc.invalidateQueries({ queryKey: ["tasks"] });
-      toast.error("Suppression impossible", { description: errMessage(err) });
+      if (snap) qc.setQueryData(["tasks"], snap)
+      else qc.invalidateQueries({ queryKey: ["tasks"] })
+      toast.error("Suppression impossible", { description: errMessage(err) })
     } finally {
-      setIsDeleting(false);
+      setIsDeleting(false)
     }
-  };
-
-  // ----- Drag & drop -----
-
-  const taskTitleOf = (id: string | number): string =>
-    tasks.find((t) => t.id === id)?.title ?? "la tâche";
-
-  const columnLabelOf = (id: string | number): string => {
-    const column = COLUMNS.find((c) => c.id === id);
-    if (column) return column.label;
-    const task = tasks.find((t) => t.id === id);
-    const status = task
-      ? COLUMNS.find((c) => c.id === task.status)?.label
-      : undefined;
-    return status ?? "cette zone";
-  };
-
-  const handleDragStart = (event: DragStartEvent) => {
-    setActiveTask(
-      tasks.find((t) => t.id === String(event.active.id)) ?? null,
-    );
-    setActiveWidth(event.active.rect.current.initial?.width ?? null);
-  };
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    setActiveTask(null);
-    setActiveWidth(null);
-    const { active, over } = event;
-    if (!over) return;
-
-    const sourceColumn = (
-      active.data.current as { column?: TaskStatus } | undefined
-    )?.column;
-    const targetColumn = (
-      over.data.current as { column?: TaskStatus } | undefined
-    )?.column;
-    if (!sourceColumn || !targetColumn || sourceColumn === targetColumn) {
-      return; // même colonne : pas de réordonnancement persisté
-    }
-
-    const task = tasks.find((t) => t.id === String(active.id));
-    if (task) void moveTask(task, targetColumn);
-  };
-
-  const handleDragCancel = () => {
-    setActiveTask(null);
-    setActiveWidth(null);
-  };
+  }
 
   // ----- Rendu -----
 
+  const filtersActive = countActiveFilters(filters) > 0
+
   return (
     <section aria-label="Tâches" className="flex flex-col gap-4">
-      {/* Barre supérieure : recherche, résumé, création */}
+      {/* ---------- Toolbar ---------- */}
       {isLoading || tasks.length > 0 ? (
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="relative w-full sm:max-w-xs">
-            <Search
-              className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <Input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Rechercher une tâche…"
-              className="h-11 pl-9"
-              aria-label="Rechercher une tâche par titre ou description"
-            />
-          </div>
-          <div className="flex items-center justify-between gap-3 sm:justify-end">
-            <p
-              className="text-xs text-muted-foreground tabular-nums sm:text-sm"
-              aria-live="polite"
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          {/* Filtres + recherche (côté client, réaction instantanée) */}
+          <TaskFilters
+            value={filters}
+            onChange={setFilters}
+            tags={tagsData?.tags ?? []}
+            className="flex-1"
+          />
+
+          {/* Actions de vue */}
+          <div className="flex flex-wrap items-center gap-2">
+            <ToggleGroup
+              type="single"
+              value={viewMode}
+              onValueChange={(value) => {
+                if (value) setViewMode(value as TasksViewMode)
+              }}
+              variant="outline"
+              aria-label="Mode d'affichage des tâches"
             >
-              {doingCount} en cours · {doneCount} terminées
-            </p>
+              <ToggleGroupItem value="kanban" className="gap-1.5" aria-label="Vue Kanban">
+                <KanbanSquare className="size-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Kanban</span>
+              </ToggleGroupItem>
+              <ToggleGroupItem value="list" className="gap-1.5" aria-label="Vue liste">
+                <Table className="size-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Liste</span>
+              </ToggleGroupItem>
+            </ToggleGroup>
+
             <Button
-              onClick={() => openCreate("todo")}
-              className="h-11 gap-2 px-4"
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 gap-1.5"
+              onClick={() => setTagManagerOpen(true)}
             >
+              <TagIcon className="size-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Tags</span>
+              <span className="sr-only sm:hidden">Gérer les tags</span>
+            </Button>
+
+            {/* Toggle « Archivées » + compteur */}
+            <div className="flex h-9 items-center gap-2 rounded-md border border-input bg-transparent px-3 shadow-xs">
+              <Switch
+                id="toggle-archived"
+                checked={showArchived}
+                onCheckedChange={setShowArchived}
+                aria-label="Afficher les tâches archivées"
+              />
+              <Label
+                htmlFor="toggle-archived"
+                className="cursor-pointer text-sm font-medium leading-none"
+              >
+                Archivées
+              </Label>
+              <Badge variant="secondary" className="px-1.5 text-[10px] tabular-nums">
+                {archivedCount}
+              </Badge>
+            </div>
+
+            <Button onClick={() => openCreate("todo")} className="h-9 gap-1.5">
               <Plus className="size-4" aria-hidden="true" />
               Nouvelle tâche
             </Button>
@@ -742,97 +354,85 @@ export function TasksView() {
         </div>
       ) : null}
 
+      {/* ---------- Bandeau de stats (toujours visible, compact) ---------- */}
+      <TaskStats />
+
+      {/* ---------- Contenu ---------- */}
       {isLoading ? (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          {COLUMNS.map((column) => (
-            <ColumnSkeleton key={column.id} />
-          ))}
-        </div>
+        viewMode === "kanban" ? <BoardSkeleton /> : <TableSkeleton />
+      ) : isError ? (
+        <Card className="mx-auto flex w-full max-w-md flex-col items-center gap-3 rounded-xl bg-card/60 p-6 text-center">
+          <p className="text-sm text-muted-foreground">
+            Impossible de charger vos tâches.
+          </p>
+          {error ? (
+            <p className="text-xs text-muted-foreground/80">{errMessage(error)}</p>
+          ) : null}
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={() => void refetch()}>
+            <RefreshCw className="size-4" aria-hidden="true" />
+            Réessayer
+          </Button>
+        </Card>
       ) : tasks.length === 0 ? (
         <GlobalEmptyState onCreate={() => openCreate("todo")} />
+      ) : visibleTasks.length === 0 ? (
+        <FilteredEmptyState onReset={() => setFilters(EMPTY_TASK_FILTERS)} />
+      ) : viewMode === "kanban" ? (
+        <TaskBoard
+          tasks={visibleTasks}
+          showArchived={showArchived}
+          eventTitles={eventTitles}
+          onEdit={openEdit}
+          onArchiveToggle={(task) => void toggleArchive(task)}
+          onDelete={setTaskToDelete}
+          onCreate={openCreate}
+        />
       ) : (
-        <>
-          {!isLoading &&
-          search.trim() !== "" &&
-          filtered.length === 0 ? (
-            <p
-              role="status"
-              className="rounded-lg border border-dashed px-4 py-3 text-sm text-muted-foreground"
-            >
-              Aucune tâche ne correspond à « {search.trim()} ».
-            </p>
-          ) : null}
-
-          <DndContext
-            sensors={sensors}
-            collisionDetection={collisionDetection}
-            onDragStart={handleDragStart}
-            onDragEnd={handleDragEnd}
-            onDragCancel={handleDragCancel}
-            accessibility={{
-              announcements: {
-                onDragStart: ({ active }) =>
-                  `Tâche saisie : ${taskTitleOf(active.id)}. Utilisez les touches fléchées pour la déplacer, puis Espace pour la déposer.`,
-                onDragOver: ({ over }) =>
-                  over ? `Zone survolée : ${columnLabelOf(over.id)}.` : "",
-                onDragEnd: ({ over }) =>
-                  over
-                    ? `Tâche déposée dans « ${columnLabelOf(over.id)} ».`
-                    : "Déplacement annulé.",
-                onDragCancel: () => "Déplacement annulé.",
-              },
-              screenReaderInstructions: {
-                draggable:
-                  "Pour saisir une tâche au clavier, placez-vous dessus avec Tab, appuyez sur Espace, déplacez-la avec les flèches, puis déposez-la avec Espace ou annulez avec Échap.",
-              },
-            }}
-          >
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              {COLUMNS.map((column) => (
-                <KanbanColumn
-                  key={column.id}
-                  column={column}
-                  tasks={visibleByStatus[column.id]}
-                  onEdit={openEdit}
-                  onMove={(task, status) => void moveTask(task, status)}
-                  onDelete={(task) => setTaskToDelete(task)}
-                  onCreate={openCreate}
-                />
-              ))}
-            </div>
-
-            <DragOverlay>
-              {activeTask ? (
-                <div style={{ width: activeWidth ?? undefined }}>
-                  <TaskCardContent task={activeTask} overlay />
-                </div>
-              ) : null}
-            </DragOverlay>
-          </DndContext>
-        </>
+        <TaskListView
+          tasks={visibleTasks}
+          onEdit={openEdit}
+          onArchiveToggle={(task) => void toggleArchive(task)}
+          onDelete={setTaskToDelete}
+        />
       )}
 
-      {/* Création / édition */}
-      <TaskDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
+      {/* ---------- Création / édition ---------- */}
+      <TaskModal
+        open={modalOpen}
+        onOpenChange={(open) => {
+          setModalOpen(open)
+          if (!open) setEditingTask(null)
+        }}
         task={editingTask}
-        defaultStatus={dialogStatus}
+        defaultStatus={modalStatus}
       />
 
-      {/* Confirmation de suppression */}
+      {/* ---------- Gestion des tags ---------- */}
+      <TagManager open={tagManagerOpen} onOpenChange={setTagManagerOpen} />
+
+      {/* ---------- Confirmation de suppression (carte / ligne) ---------- */}
       <AlertDialog
         open={taskToDelete !== null}
         onOpenChange={(open) => {
-          if (!open) setTaskToDelete(null);
+          if (!open) setTaskToDelete(null)
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Supprimer cette tâche ?</AlertDialogTitle>
             <AlertDialogDescription>
-              « {taskToDelete?.title} » sera définitivement supprimée. Cette
-              action est irréversible.
+              {taskToDelete?.status === "archived" ? (
+                <>
+                  « {taskToDelete?.title} » (archivée) sera définitivement
+                  supprimée, avec ses sous-tâches. Cette action est irréversible.
+                </>
+              ) : (
+                <>
+                  « {taskToDelete?.title} » sera définitivement supprimée, avec
+                  ses sous-tâches. Cette action est irréversible — pour la
+                  garder en réserve, préférez « Archiver ».
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -840,8 +440,9 @@ export function TasksView() {
             <AlertDialogAction
               className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive"
               disabled={isDeleting}
-              onClick={() => {
-                if (taskToDelete) void deleteTask(taskToDelete);
+              onClick={(e) => {
+                e.preventDefault() // on garde le dialog ouvert jusqu'au résultat
+                if (taskToDelete) void deleteTask(taskToDelete)
               }}
             >
               {isDeleting ? (
@@ -849,11 +450,11 @@ export function TasksView() {
               ) : (
                 <Trash2 className="size-4" aria-hidden="true" />
               )}
-              Supprimer
+              Supprimer définitivement
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </section>
-  );
+  )
 }

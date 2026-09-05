@@ -218,11 +218,11 @@ async function notifyReminders(): Promise<Response> {
     }
   }
 
-  // ── Tâches non terminées échuant dans moins d'1 heure ──────────────────
+  // ── Tâches non terminées/non archivées échuant dans moins d'1 heure ─────
   const dueTasks = await db.task.findMany({
     where: {
       reminderSentAt: null,
-      status: { not: "done" },
+      status: { notIn: ["done", "archived"] },
       dueDate: { gte: now, lte: new Date(now.getTime() + TASK_LEAD_MS) },
     },
     take: 50,

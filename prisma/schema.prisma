@@ -22,6 +22,7 @@ model User {
 
   events           Event[]
   tasks            Task[]
+  tags             Tag[]
   emailLogs        EmailLog[]
   pushSubscriptions PushSubscription[]
 }
@@ -64,23 +65,86 @@ model Event {
   @@index([userId, startTime])
   @@index([userId, endTime])
   @@index([userId, externalId])
+
+  // Tâches liées à cet événement (lien optionnel tâche ↔ calendrier)
+  tasks            Task[]
 }
 
 model Task {
   id          String    @id @default(cuid())
   userId      String
   user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   title       String
   description String?
-  status      String    @default("todo") // todo | doing | done
-  priority    Int       @default(1) // 0 = basse, 1 = moyenne, 2 = haute
-  dueDate        DateTime?
-  aiPriority     Int?
-  reminderSentAt DateTime? // horodatage du rappel « H-1 » (nullable = pas encore notifié)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+
+  // Statut kanban : "todo" | "doing" | "done" | "archived"
+  // (archivé = soft delete, masqué par défaut dans l'UI ;
+  //  correspond à TODO / IN_PROGRESS / DONE / ARCHIVED de la spec)
+  status      String    @default("todo")
+  // Priorité : "LOW" | "MEDIUM" | "HIGH" | "URGENT"
+  priority    String    @default("MEDIUM")
+
+  // Ordre dans la colonne Kanban — entiers ESPACÉS (1000, 2000, 3000…)
+  // pour éviter les recalculs fréquents ; renormalisés côté serveur au move.
+  position    Int       @default(0)
+
+  dueDate     DateTime?
+  // Horodatage de passage à "done" (statistiques de complétion)
+  completedAt DateTime?
+
+  // Étiquettes (many-to-many, partagées entre les tâches de l'utilisateur)
+  tags        Tag[]     @relation("TaskTags")
+
+  // Sous-tâches (supprimées en cascade avec la tâche)
+  subtasks    SubTask[]
+
+  // Suggestion de priorité par l'IA (Phase 4 — placeholder, non peuplé)
+  aiSuggestedPriority String? // "LOW" | "MEDIUM" | "HIGH" | "URGENT"
+  aiConfidence        Float?   // score de confiance 0..1
+
+  // Lien optionnel vers un événement du calendrier
+  eventId     String?
+  event       Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  // Horodatage du rappel « H-1 » (reminder-service) — nullable = pas encore notifié
+  reminderSentAt DateTime?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@index([userId, status])
+  @@index([userId, dueDate])
+  @@index([userId, priority])
+}
+
+model SubTask {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  title     String
+  completed Boolean  @default(false)
+  // Ordre dans la liste des sous-tâches (entiers espacés, même convention que Task)
+  position  Int      @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+model Tag {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name   String
+  color  String @default("#00D4FF") // hex #RRGGBB
+
+  tasks  Task[] @relation("TaskTags")
+
+  // Un même nom de tag une seule fois par utilisateur (upsert côté API)
+  @@unique([userId, name])
 }
 
 model EmailLog {

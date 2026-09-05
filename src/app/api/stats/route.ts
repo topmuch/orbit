@@ -10,8 +10,10 @@ import { NextRequest, NextResponse } from "next/server"
 import { addDays, isBefore } from "date-fns"
 import { db } from "@/lib/db"
 import { getSessionUser } from "@/lib/auth"
-import { toTaskDto, toEmailDto } from "@/lib/dto"
+import { toEmailDto } from "@/lib/dto"
 import { loadExpandedEvents } from "@/lib/events-service"
+import { TASK_INCLUDE, taskDto } from "@/lib/tasks-service"
+import { priorityWeight } from "@/lib/tasks"
 import { dayKeyInTz, isValidTimezone, utcToWall } from "@/lib/timezone"
 import type { StatsDto, EventDto } from "@/lib/types"
 
@@ -27,7 +29,7 @@ export async function GET(req: NextRequest) {
   // Agenda élargi : cette semaine (UTC) + marge de 7 jours, expansions incluses
   const [events, tasks, emails, userRow] = await Promise.all([
     loadExpandedEvents(user.id, new Date(now.getTime() - 14 * 86_400_000), addDays(now, 21)),
-    db.task.findMany({ where: { userId: user.id } }),
+    db.task.findMany({ where: { userId: user.id }, include: TASK_INCLUDE }),
     db.emailLog.findMany({
       where: { userId: user.id },
       orderBy: { receivedAt: "desc" },
@@ -57,21 +59,24 @@ export async function GET(req: NextRequest) {
   const todayEvents = events.filter((e) => dayKeyInTz(new Date(e.startTime), effectiveTz) === todayKey)
   const nextEvent: EventDto | null = events.find((e) => new Date(e.startTime) >= now) ?? null
 
-  const pendingTasks = tasks.filter((t) => t.status !== "done")
+  // Tâches actives = non archivées (l'archivage est un soft delete)
+  const activeTasks = tasks.filter((t) => t.status !== "archived")
+  const pendingTasks = activeTasks.filter((t) => t.status !== "done")
   const priorityTasks = [...pendingTasks]
     .sort((a, b) => {
       const dueA = a.dueDate ? a.dueDate.getTime() : Infinity
       const dueB = b.dueDate ? b.dueDate.getTime() : Infinity
-      if (b.priority !== a.priority) return b.priority - a.priority
+      const w = priorityWeight(b.priority) - priorityWeight(a.priority)
+      if (w !== 0) return w
       return dueA - dueB
     })
     .slice(0, 5)
 
   const stats: StatsDto = {
     eventsToday: todayEvents.length,
-    tasksTodo: tasks.filter((t) => t.status === "todo").length,
-    tasksDoing: tasks.filter((t) => t.status === "doing").length,
-    tasksDone: tasks.filter((t) => t.status === "done").length,
+    tasksTodo: activeTasks.filter((t) => t.status === "todo").length,
+    tasksDoing: activeTasks.filter((t) => t.status === "doing").length,
+    tasksDone: activeTasks.filter((t) => t.status === "done").length,
     tasksOverdue: pendingTasks.filter((t) => t.dueDate && isBefore(t.dueDate, now)).length,
     unreadEmails: await db.emailLog.count({ where: { userId: user.id, isRead: false } }),
     unprocessedEmails: await db.emailLog.count({
@@ -79,7 +84,7 @@ export async function GET(req: NextRequest) {
     }),
     nextEvent,
     todayEvents,
-    priorityTasks: priorityTasks.map(toTaskDto),
+    priorityTasks: priorityTasks.map(taskDto),
     recentEmails: emails.map(toEmailDto),
     weekLoad,
   }

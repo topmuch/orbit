@@ -18,8 +18,12 @@ export function PwaRegister() {
   const setSwReady = usePwaStore((s) => s.setSwReady);
 
   useEffect(() => {
-    // 1. Service Worker
-    if ("serviceWorker" in navigator) {
+    // 1. Service Worker — JAMAIS en dev : le SW met en cache-first les
+    //    chunks /_next/ (noms stables non hashés en dev) → le navigateur
+    //    rejouerait indéfiniment le bundle du premier chargement, ignorant
+    //    les rechargements/HMR (boucles de refetch fantômes). En production
+    //    les chunks sont hashés par contenu → cache-first sûr.
+    if ("serviceWorker" in navigator && process.env.NODE_ENV !== "development") {
       navigator.serviceWorker
         .register("/sw.js")
         .then(() => setSwReady(true))

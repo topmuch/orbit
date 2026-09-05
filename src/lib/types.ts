@@ -100,18 +100,85 @@ export type EventImportResult = {
   warnings: string[]
 }
 
-export type TaskStatus = "todo" | "doing" | "done"
+export type TaskStatus = "todo" | "doing" | "done" | "archived"
+
+/** Priorités de tâche (spec : TODO/IN_PROGRESS/DONE/ARCHIVED ↔ todo/doing/done/archived). */
+export type TaskPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT"
+
+/** Étiquette colorée, partagée entre les tâches d'un utilisateur. */
+export type TagDto = {
+  id: string
+  name: string
+  color: string // hex #RRGGBB
+}
+
+/** Sous-tâche (checkbox ordonnée). */
+export type SubTaskDto = {
+  id: string
+  title: string
+  completed: boolean
+  position: number
+  createdAt: string
+}
 
 export type TaskDto = {
   id: string
   title: string
   description: string | null
   status: TaskStatus
-  priority: number // 0 = basse, 1 = moyenne, 2 = haute
+  priority: TaskPriority
+  /** Ordre dans la colonne Kanban (entiers espacés 1000, 2000…). */
+  position: number
   dueDate: string | null
-  aiPriority: number | null
+  /** Passage à « done » (statistiques) — null sinon. */
+  completedAt: string | null
+  tags: TagDto[]
+  subtasks: SubTaskDto[]
+  /** Suggestion IA (Phase 4) : priorité + confiance 0..1. */
+  aiSuggestedPriority: TaskPriority | null
+  aiConfidence: number | null
+  /** Lien optionnel vers un événement du calendrier. */
+  eventId: string | null
   createdAt: string
   updatedAt: string
+}
+
+/** Entrée de création : tags par nom (upsert server), sous-tâches simples. */
+export type TaskCreateInput = {
+  title: string
+  description?: string | null
+  status?: TaskStatus
+  priority?: TaskPriority
+  dueDate?: string | null
+  tags?: { name: string; color?: string }[]
+  subtasks?: { title: string }[]
+  eventId?: string | null
+}
+
+/** Mise à jour partielle : tableaux = remplacement complet de la collection. */
+export type TaskUpdateInput = Partial<TaskCreateInput> & {
+  position?: number
+  /** Écrase une éventuelle suggestion IA après application manuelle. */
+  aiSuggestedPriority?: TaskPriority | null
+}
+
+/** Déplacement Kanban optimisé (drag & drop) — position = indice cible. */
+export type TaskMoveInput = {
+  status: TaskStatus
+  position: number
+}
+
+/** Statistiques de tâches (vue « stats »). */
+export type TaskStatsDto = {
+  total: number
+  byStatus: Record<TaskStatus, number>
+  byPriority: Record<TaskPriority, number>
+  overdue: number
+  completedThisWeek: number
+  /** 0..1 (tâches actives terminées). */
+  completionRate: number
+  /** 7 derniers jours (aujourd'hui en dernier) : tâches complétées par jour. */
+  week: { date: string; label: string; completed: number }[]
 }
 
 /** Suggestion d'événement extraite par l'IA depuis un email */

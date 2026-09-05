@@ -1,7 +1,8 @@
 /* Orbit — Service Worker
-   Stratégie : navigations en network-first (fraîcheur), statiques cache-first, API hors cache. */
+   Stratégie : navigations en network-first (fraîcheur), statiques cache-first, API hors cache.
+   v2 : purge des caches v1 (chunks dev périmés chez les premiers testeurs). */
 
-const CACHE = "orbit-v1";
+const CACHE = "orbit-v2";
 const PRECACHE = [
   "/",
   "/offline.html",

@@ -12,7 +12,8 @@ import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { EventCard, eventKeyOf } from "@/components/orbit/event-card"
 import { EventDialog } from "@/components/orbit/event-dialog"
-import { TaskDialog } from "@/components/orbit/task-dialog"
+import { TaskModal } from "@/components/orbit/tasks/task-modal"
+import { PRIORITY_COLORS } from "@/components/orbit/tasks/priority-badge"
 import { useTimezone } from "@/hooks/useTimezone"
 import {
   useStats,
@@ -336,7 +337,8 @@ export function DashboardView({
                     >
                       <span className="flex items-center gap-1.5">
                         <Flag
-                          className={`size-3.5 shrink-0 ${task.priority === 2 ? "text-red-500" : task.priority === 1 ? "text-primary" : "text-muted-foreground"}`}
+                          className="size-3.5 shrink-0"
+                          style={{ color: PRIORITY_COLORS[task.priority] }}
                           aria-hidden
                         />
                         <span className="truncate text-sm font-medium">{task.title}</span>
@@ -418,7 +420,7 @@ export function DashboardView({
         event={editEvent}
         defaultDate={new Date()}
       />
-      <TaskDialog open={taskDialogOpen} onOpenChange={setTaskDialogOpen} />
+      <TaskModal open={taskDialogOpen} onOpenChange={setTaskDialogOpen} />
     </div>
   )
 }

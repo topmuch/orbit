@@ -3,7 +3,7 @@
 // Lecture défensive des champs JSON (attendus de la validation Zod, mais
 // potentiellement corrompus/hérités) : toute valeur invalide est ignorée.
 
-import type { Event, Task, EmailLog } from "@prisma/client"
+import type { Event, Task, EmailLog, Tag, SubTask } from "@prisma/client"
 import type {
   EventDto,
   TaskDto,
@@ -12,8 +12,13 @@ import type {
   RecurrenceRule,
   EventAttendee,
   EventReminder,
+  TaskPriority,
+  TaskStatus,
 } from "@/lib/types"
 import type { Occurrence } from "@/lib/calendar"
+
+/** Tâche Prisma avec relations chargées (tags + subtasks). */
+export type TaskWithRelations = Task & { tags: Tag[]; subtasks: SubTask[] }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lecteurs JSON défensifs
@@ -111,15 +116,50 @@ export function toOccurrenceDto(e: Event, occ: Occurrence): EventDto {
   }
 }
 
-export function toTaskDto(t: Task): TaskDto {
+/** Priorité valide depuis la base (défensif : valeurs héritées "1"/"2" → MEDIUM). */
+function toPriority(raw: string | null | undefined): TaskPriority {
+  return raw === "LOW" || raw === "MEDIUM" || raw === "HIGH" || raw === "URGENT"
+    ? raw
+    : "MEDIUM"
+}
+
+/** Statut valide depuis la base (défensif). */
+function toTaskStatus(raw: string | null | undefined): TaskStatus {
+  return raw === "todo" || raw === "doing" || raw === "done" || raw === "archived"
+    ? raw
+    : "todo"
+}
+
+export function toTaskDto(t: TaskWithRelations): TaskDto {
   return {
     id: t.id,
     title: t.title,
     description: t.description,
-    status: (t.status as TaskDto["status"]) ?? "todo",
-    priority: t.priority,
+    status: toTaskStatus(t.status),
+    priority: toPriority(t.priority),
+    position: t.position,
     dueDate: t.dueDate ? t.dueDate.toISOString() : null,
-    aiPriority: t.aiPriority,
+    completedAt: t.completedAt ? t.completedAt.toISOString() : null,
+    tags: (t.tags ?? []).map((tag) => ({ id: tag.id, name: tag.name, color: tag.color })),
+    subtasks: (t.subtasks ?? [])
+      .slice()
+      .sort((a, b) => a.position - b.position)
+      .map((s) => ({
+        id: s.id,
+        title: s.title,
+        completed: s.completed,
+        position: s.position,
+        createdAt: s.createdAt.toISOString(),
+      })),
+    aiSuggestedPriority:
+      t.aiSuggestedPriority === "LOW" ||
+      t.aiSuggestedPriority === "MEDIUM" ||
+      t.aiSuggestedPriority === "HIGH" ||
+      t.aiSuggestedPriority === "URGENT"
+        ? t.aiSuggestedPriority
+        : null,
+    aiConfidence: typeof t.aiConfidence === "number" ? t.aiConfidence : null,
+    eventId: t.eventId,
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   }

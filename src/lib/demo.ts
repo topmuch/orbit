@@ -75,29 +75,195 @@ export async function seedDemoData(userId: string): Promise<void> {
     })),
   })
 
-  // ---------- Tâches ----------
-  const tasks = [
-    { title: "Préparer la présentation Orbit", description: "Slides + démo live pour le comité.", status: "todo", priority: 2, dueDate: at(addDays(now, 1), 18, 0) },
-    { title: "Répondre au client Dupont", description: "Question sur les délais de livraison.", status: "todo", priority: 2, dueDate: at(now, 18, 0) },
-    { title: "Réserver un restaurant pour samedi", description: "Chercher une table pour 6.", status: "todo", priority: 1, dueDate: at(addDays(now, 2), 12, 0) },
-    { title: "Trier la boîte de réception", description: "Appliquer Inbox Zero, archiver les newsletters.", status: "todo", priority: 0, dueDate: null },
-    { title: "Rédiger le cahier des charges", description: "Section architecture + sécurité.", status: "doing", priority: 1, dueDate: at(addDays(now, 3), 17, 0) },
-    { title: "Découvrir Ollama en local", description: "Installer Llama 3 8B quantifié et tester.", status: "doing", priority: 1, dueDate: null },
-    { title: "Mettre à jour le CV", description: "Ajouter le projet Orbit et les skills IA.", status: "done", priority: 1, dueDate: null },
-    { title: "Payer la facture internet", description: "Facture de novembre.", status: "done", priority: 2, dueDate: at(addDays(now, -2), 12, 0) },
-    { title: "Configurer l'environnement de dev", description: "Next.js, Prisma, Docker.", status: "done", priority: 1, dueDate: null },
+  // ---------- Tags ----------
+  const tagDefs = [
+    { name: "Travail", color: "#00D4FF" },
+    { name: "Perso", color: "#22C55E" },
+    { name: "Urgent", color: "#EF4444" },
+    { name: "Design", color: "#F97316" },
+    { name: "Finance", color: "#A78BFA" },
+    { name: "Santé", color: "#14B8A6" },
+  ]
+  const tags = await Promise.all(
+    tagDefs.map((t) =>
+      db.tag.upsert({
+        where: { userId_name: { userId, name: t.name } },
+        create: { userId, name: t.name, color: t.color },
+        update: {},
+      })
+    )
+  )
+  const tagByName = (name: string) => {
+    const tag = tags.find((t) => t.name === name)
+    return tag ? [{ id: tag.id }] : []
+  }
+
+  // ---------- Tâches (statuts, priorités, tags, sous-tâches, positions) ----------
+  type DemoTask = {
+    title: string
+    description?: string
+    status: "todo" | "doing" | "done"
+    priority: "LOW" | "MEDIUM" | "HIGH" | "URGENT"
+    dueDate: Date | null
+    tagNames?: string[]
+    subtasks?: { title: string; completed?: boolean }[]
+    completedDaysAgo?: number
+  }
+
+  const demoTasks: DemoTask[] = [
+    {
+      title: "Préparer la présentation Orbit",
+      description: "Slides + démo live pour le comité de direction.",
+      status: "todo",
+      priority: "URGENT",
+      dueDate: at(addDays(now, 1), 18, 0),
+      tagNames: ["Travail", "Urgent"],
+      subtasks: [
+        { title: "Structurer le plan (intro, démo, roadmap)" },
+        { title: "Préparer les captures d'écran" },
+        { title: "Répéter la démo live", completed: true },
+      ],
+    },
+    {
+      title: "Répondre au client Dupont",
+      description: "Question sur les délais de livraison du lot 3.",
+      status: "todo",
+      priority: "HIGH",
+      dueDate: at(now, 18, 0),
+      tagNames: ["Travail", "Urgent"],
+    },
+    {
+      title: "Réserver un restaurant pour samedi",
+      description: "Table pour 6, italien de préférence.",
+      status: "todo",
+      priority: "MEDIUM",
+      dueDate: at(addDays(now, 2), 12, 0),
+      tagNames: ["Perso"],
+      subtasks: [
+        { title: "Comparer 2-3 adresses" },
+        { title: "Appeler pour réserver", completed: true },
+      ],
+    },
+    {
+      title: "Trier la boîte de réception",
+      description: "Appliquer Inbox Zero, archiver les newsletters.",
+      status: "todo",
+      priority: "LOW",
+      dueDate: null,
+      tagNames: ["Perso"],
+    },
+    {
+      title: "Régler la facture d'électricité",
+      description: "Prélèvement à vérifier sur le compte.",
+      status: "todo",
+      priority: "HIGH",
+      dueDate: subDays(now, 1), // en retard — alerte visuelle
+      tagNames: ["Finance"],
+    },
+    {
+      title: "Rédiger le cahier des charges",
+      description: "Sections architecture + sécurité.",
+      status: "doing",
+      priority: "HIGH",
+      dueDate: at(addDays(now, 3), 17, 0),
+      tagNames: ["Travail"],
+      subtasks: [
+        { title: "Contexte et objectifs", completed: true },
+        { title: "Architecture technique", completed: true },
+        { title: "Exigences de sécurité" },
+        { title: "Planning de livraison" },
+        { title: "Annexes" },
+      ],
+    },
+    {
+      title: "Maquettes de la vue Kanban",
+      description: "Colonnes, cartes, badges de priorité — déclinaison mobile.",
+      status: "doing",
+      priority: "MEDIUM",
+      dueDate: at(addDays(now, 2), 15, 0),
+      tagNames: ["Travail", "Design"],
+      subtasks: [
+        { title: "Desktop 3 colonnes", completed: true },
+        { title: "Mobile : tabs entre statuts" },
+      ],
+    },
+    {
+      title: "Découvrir Ollama en local",
+      description: "Installer Llama 3 8B quantifié et tester.",
+      status: "doing",
+      priority: "MEDIUM",
+      dueDate: null,
+      tagNames: ["Perso"],
+    },
+    {
+      title: "Mettre à jour le CV",
+      description: "Ajouter le projet Orbit et les skills IA.",
+      status: "done",
+      priority: "MEDIUM",
+      dueDate: null,
+      tagNames: ["Perso"],
+      completedDaysAgo: 2,
+    },
+    {
+      title: "Payer la facture internet",
+      description: "Facture de novembre.",
+      status: "done",
+      priority: "HIGH",
+      dueDate: at(addDays(now, -2), 12, 0),
+      tagNames: ["Finance"],
+      completedDaysAgo: 4,
+    },
+    {
+      title: "Configurer l'environnement de dev",
+      description: "Next.js, Prisma, Docker.",
+      status: "done",
+      priority: "MEDIUM",
+      dueDate: null,
+      tagNames: ["Travail"],
+      completedDaysAgo: 6,
+    },
+    {
+      title: "Séance de sport",
+      description: "Haut du corps — BasicFit.",
+      status: "done",
+      priority: "LOW",
+      dueDate: at(addDays(now, -1), 18, 0),
+      tagNames: ["Santé"],
+      completedDaysAgo: 1,
+    },
   ]
 
-  await db.task.createMany({
-    data: tasks.map((t) => ({
-      userId,
-      title: t.title,
-      description: t.description,
-      status: t.status,
-      priority: t.priority,
-      dueDate: t.dueDate,
-    })),
-  })
+  // Position par colonne (entiers espacés)
+  const columnCounters: Record<string, number> = {}
+  for (const t of demoTasks) {
+    const index = (columnCounters[t.status] ?? 0) + 1
+    columnCounters[t.status] = index
+    await db.task.create({
+      data: {
+        userId,
+        title: t.title,
+        description: t.description ?? null,
+        status: t.status,
+        priority: t.priority,
+        position: index * 1000,
+        dueDate: t.dueDate,
+        completedAt:
+          t.completedDaysAgo !== undefined ? subDays(now, t.completedDaysAgo) : t.status === "done" ? now : null,
+        tags: { connect: (t.tagNames ?? []).flatMap(tagByName) },
+        ...(t.subtasks?.length
+          ? {
+              subtasks: {
+                create: t.subtasks.map((s, i) => ({
+                  title: s.title,
+                  completed: s.completed ?? false,
+                  position: (i + 1) * 1000,
+                })),
+              },
+            }
+          : {}),
+      },
+    })
+  }
 
   // ---------- Emails ----------
   const emails = [

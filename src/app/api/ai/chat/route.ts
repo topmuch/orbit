@@ -38,11 +38,22 @@ export async function POST(req: NextRequest) {
       list.slice(0, 30)
     ),
     db.task.findMany({
-      where: { userId: user.id, status: { not: "done" } },
-      orderBy: [{ priority: "desc" }, { dueDate: "asc" }],
+      // Tâches actives (archivées exclues) — priorité triée en mémoire
+      // (String LOW/MEDIUM/HIGH/URGENT : l'ordre alphabétique SQL est faux)
+      where: { userId: user.id, status: { notIn: ["done", "archived"] } },
       take: 15,
     }),
   ])
+
+  // Tri : URGENT d'abord, puis échéance la plus proche
+  tasks.sort((a, b) => {
+    const W = { LOW: 0, MEDIUM: 1, HIGH: 2, URGENT: 3 } as Record<string, number>
+    const w = (W[b.priority] ?? 1) - (W[a.priority] ?? 1)
+    if (w !== 0) return w
+    const aDue = a.dueDate ? a.dueDate.getTime() : Infinity
+    const bDue = b.dueDate ? b.dueDate.getTime() : Infinity
+    return aDue - bDue
+  })
 
   const agenda = events
     .map((e) => {

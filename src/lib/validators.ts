@@ -126,20 +126,92 @@ export const icsJsonSchema = z.object({
   ics: z.string().min(1, "Contenu iCal vide").max(1_000_000),
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tâches — validation riche (statuts, priorités, tags, sous-tâches)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const taskStatus = z.enum(["todo", "doing", "done", "archived"], {
+  message: "Statut invalide (todo | doing | done | archived)",
+})
+const taskPriority = z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"], {
+  message: "Priorité invalide (LOW | MEDIUM | HIGH | URGENT)",
+})
+
+/** Limite de sécurité : sous-tâches par tâche. */
+export const SUBTASKS_MAX = 50
+/** Limite de sécurité : tags par tâche. */
+export const TASK_TAGS_MAX = 10
+
+/** Tag en entrée de création/édition de tâche : identifié par nom (upsert). */
+const taskTagInput = z.object({
+  name: z.string().trim().min(1, "Nom de tag requis").max(50, "Nom de tag trop long (50 max)"),
+  color: hexColor.optional(),
+})
+
+const subtaskInput = z.object({
+  title: z.string().trim().min(1, "Le titre de la sous-tâche est requis").max(200),
+})
+
 export const taskCreateSchema = z.object({
-  title: z.string().trim().min(2, "Titre requis").max(120),
-  description: z.string().trim().max(2000).optional().or(z.literal("")),
-  status: z.enum(["todo", "doing", "done"]).optional(),
-  priority: z.number().int().min(0).max(2).optional(),
+  title: z.string().trim().min(1, "Le titre est requis").max(200, "Titre trop long (200 max)"),
+  // null accepté (champ vidé côté UI) — cohérent avec taskUpdateSchema
+  description: z.string().trim().max(10000, "Description trop longue (10 000 max)").nullable().optional(),
+  status: taskStatus.optional(),
+  priority: taskPriority.optional(),
   dueDate: isoDate.nullable().optional(),
+  tags: z.array(taskTagInput).max(TASK_TAGS_MAX, `Trop de tags (${TASK_TAGS_MAX} max par tâche)`).optional(),
+  subtasks: z
+    .array(subtaskInput)
+    .max(SUBTASKS_MAX, `Trop de sous-tâches (${SUBTASKS_MAX} max par tâche)`)
+    .optional(),
+  eventId: z.string().trim().min(1).nullable().optional(),
 })
 
 export const taskUpdateSchema = z.object({
-  title: z.string().trim().min(2).max(120).optional(),
-  description: z.string().trim().max(2000).nullable().optional(),
-  status: z.enum(["todo", "doing", "done"]).optional(),
-  priority: z.number().int().min(0).max(2).optional(),
+  title: z.string().trim().min(1, "Le titre est requis").max(200).optional(),
+  description: z.string().trim().max(10000).nullable().optional(),
+  status: taskStatus.optional(),
+  priority: taskPriority.optional(),
   dueDate: isoDate.nullable().optional(),
+  position: z.number().int().min(0).optional(),
+  tags: z.array(taskTagInput).max(TASK_TAGS_MAX).optional(),
+  subtasks: z.array(subtaskInput).max(SUBTASKS_MAX).optional(),
+  eventId: z.string().trim().min(1).nullable().optional(),
+  aiSuggestedPriority: taskPriority.nullable().optional(),
+})
+
+/** Déplacement Kanban : { status, position } — position = indice cible (0-based). */
+export const taskMoveSchema = z.object({
+  status: taskStatus,
+  position: z
+    .number({ message: "Position requise (indice cible)" })
+    .int("Position invalide (entier attendu)")
+    .min(0, "Position invalide (≥ 0)"),
+})
+
+export const subtaskCreateSchema = z.object({
+  title: z.string().trim().min(1, "Le titre de la sous-tâche est requis").max(200),
+})
+
+export const subtaskUpdateSchema = z.object({
+  title: z.string().trim().min(1, "Le titre de la sous-tâche est requis").max(200).optional(),
+  completed: z.boolean().optional(),
+  /** Indice cible dans la liste (renormalisation serveur). */
+  position: z.number().int().min(0).optional(),
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tags — validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const tagCreateSchema = z.object({
+  name: z.string().trim().min(1, "Le nom du tag est requis").max(50, "Nom trop long (50 max)"),
+  color: hexColor.default("#00D4FF"),
+})
+
+export const tagUpdateSchema = z.object({
+  name: z.string().trim().min(1, "Le nom du tag est requis").max(50).optional(),
+  color: hexColor.optional(),
 })
 
 export const emailPatchSchema = z.object({

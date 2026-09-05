@@ -13,6 +13,10 @@ import type {
   EventCreateInput,
   EventImportResult,
   TaskDto,
+  TaskCreateInput,
+  TaskUpdateInput,
+  TaskStatsDto,
+  TagDto,
   EmailDto,
   EventSuggestion,
   StatsDto,
@@ -108,13 +112,30 @@ async function fetchEvents(
   return api<{ events: EventDto[] }>(`/api/events${qs ? `?${qs}` : ""}`)
 }
 
+/**
+ * Tronque un instant à la MINUTE pour la queryKey : les plages calculées avec
+ * `new Date()` (notifications-center, liaisons calendrier des tâches…) sinon
+ * changent à chaque re-render/remount (millisecondes) → boucle de refetch
+ * auto-entretenue (chaque fetch écrit dev.log → re-render → nouvelle clé…).
+ * Granularité minute = au plus 1 requête/minute par plage — imperceptible
+ * pour des plages de 24 h à 8 mois.
+ */
+function minuteKey(d: Date): string {
+  return new Date(Math.floor(d.getTime() / 60_000) * 60_000).toISOString()
+}
+
 /** Événements (occurrences expansées) d'une plage [start, end]. */
 export function useEventsRange(start?: Date, end?: Date) {
-  const isoStart = start?.toISOString()
-  const isoEnd = end?.toISOString()
+  const isoStart = start ? minuteKey(start) : undefined
+  const isoEnd = end ? minuteKey(end) : undefined
   return useQuery<{ events: EventDto[] }>({
     queryKey: ["events", "range", isoStart ?? "", isoEnd ?? ""],
-    queryFn: () => fetchEvents(isoStart, isoEnd),
+    // La requête conserve les instants EXACTS (la clé seule est tronquée) :
+    // un cache servi d'une minute à l'autre reste dans la tolérance des plages.
+    queryFn: () => fetchEvents(start?.toISOString(), end?.toISOString()),
+    // Anti-burst : les remounts rapides servent le cache au lieu de refetcher
+    // (les invalidations après mutations passent toujours).
+    staleTime: 30_000,
   })
 }
 
@@ -235,29 +256,68 @@ export async function exportEvents(range?: { start: Date; end: Date }): Promise<
   return filename
 }
 
-// ---------- Tâches ----------
+// ---------- Tâches (contrats gelés 13-a) ----------
 
+/** Réponse GET /api/tasks (pagination + total — le front charge tout). */
+export type TaskListResult = {
+  tasks: TaskDto[]
+  page: number
+  limit: number
+  total: number
+}
+
+/** Entrée de création de tâche (tags par nom, sous-tâches simples). */
+export type TaskInput = TaskCreateInput
+
+/** Entrée de mise à jour (tableaux tags/subtasks = remplacement complet). */
+export type TaskPatchInput = TaskUpdateInput
+
+/** Tâches de l'utilisateur (volume personnel : tout, relations incluses). */
 export function useTasks() {
-  return useQuery<{ tasks: TaskDto[] }>({
+  return useQuery<TaskListResult>({
     queryKey: ["tasks"],
-    queryFn: () => api<{ tasks: TaskDto[] }>("/api/tasks"),
+    queryFn: () => api<TaskListResult>("/api/tasks"),
   })
 }
 
-export type TaskInput = {
-  title: string
-  description?: string
-  status?: "todo" | "doing" | "done"
-  priority?: number
-  dueDate?: string | null
+/** Statistiques du système de tâches (Kanban + semaine de complétions). */
+export function useTaskStats() {
+  return useQuery<{ stats: TaskStatsDto }>({
+    queryKey: ["task-stats"],
+    queryFn: () => api<{ stats: TaskStatsDto }>("/api/tasks/stats"),
+  })
+}
+
+// ---------- Tags ----------
+
+/** Tag avec nombre de tâches associées (GET /api/tags). */
+export type TagWithCount = TagDto & { taskCount: number }
+
+/** Tags partagés de l'utilisateur. */
+export function useTags() {
+  return useQuery<{ tags: TagWithCount[] }>({
+    queryKey: ["tags"],
+    queryFn: () => api<{ tags: TagWithCount[] }>("/api/tags"),
+  })
+}
+
+/**
+ * Invalidation commune après toute mutation de tâche : les tâches (liste,
+ * stats de tâches, compteurs de tags) ET les stats globales du dashboard.
+ */
+function useInvalidateTaskData() {
+  const qc = useQueryClient()
+  return () => {
+    qc.invalidateQueries({ queryKey: ["tasks"] })
+    qc.invalidateQueries({ queryKey: ["task-stats"] })
+    qc.invalidateQueries({ queryKey: ["tags"] })
+    qc.invalidateQueries({ queryKey: ["stats"] })
+  }
 }
 
 export function useTaskMutations() {
   const qc = useQueryClient()
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["tasks"] })
-    qc.invalidateQueries({ queryKey: ["stats"] })
-  }
+  const invalidate = useInvalidateTaskData()
 
   const create = useMutation({
     mutationFn: (input: TaskInput) =>
@@ -267,16 +327,149 @@ export function useTaskMutations() {
       }),
     onSuccess: invalidate,
   })
+
   const update = useMutation({
-    mutationFn: (vars: { id: string; input: Partial<TaskInput> }) =>
+    mutationFn: (vars: { id: string; input: TaskPatchInput }) =>
       api<{ task: TaskDto }>(`/api/tasks/${vars.id}`, {
         method: "PATCH",
         body: JSON.stringify(vars.input),
       }),
     onSuccess: invalidate,
   })
+
+  /** Déplacement Kanban (drag & drop) : position = INDICE cible 0-based,
+   *  le serveur renormalise toute la colonne. */
+  const move = useMutation({
+    mutationFn: (vars: { id: string; status: TaskDto["status"]; position: number }) =>
+      api<{ task: TaskDto }>(`/api/tasks/${vars.id}/move`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: vars.status, position: vars.position }),
+      }),
+    onSuccess: invalidate,
+  })
+
+  /** Archivage = DELETE soft (status=archived). Un 2e appel purgerait. */
+  const archive = useMutation({
+    mutationFn: (id: string) =>
+      api<{ ok: boolean; mode: "archived" | "deleted" }>(`/api/tasks/${id}`, {
+        method: "DELETE",
+      }),
+    onSuccess: invalidate,
+  })
+
+  /** Suppression définitive (?hard=1 → purge + sous-tâches). */
+  const removeHard = useMutation({
+    mutationFn: (id: string) =>
+      api<{ ok: boolean; mode: "archived" | "deleted" }>(`/api/tasks/${id}?hard=1`, {
+        method: "DELETE",
+      }),
+    onSuccess: invalidate,
+  })
+
+  return { create, update, move, archive, removeHard }
+}
+
+// ---------- Sous-tâches ----------
+
+/** Réponse des mutations de sous-tâches : tâche recalculée côté serveur. */
+export type SubtaskMutationResult = {
+  task: TaskDto
+  subtask?: { id: string; title: string; completed: boolean; position: number; createdAt: string }
+}
+
+export function useSubtaskMutations() {
+  const qc = useQueryClient()
+
+  /** Remplace la tâche portée dans le cache ["tasks"] par la réponse serveur
+   *  (les sous-tâches reviennent triées par position). */
+  const replaceTask = (task: TaskDto) => {
+    qc.setQueryData<TaskListResult>(["tasks"], (old) =>
+      old ? { ...old, tasks: old.tasks.map((t) => (t.id === task.id ? task : t)) } : old
+    )
+  }
+
+  const add = useMutation({
+    mutationFn: (vars: { taskId: string; title: string }) =>
+      api<SubtaskMutationResult>(`/api/tasks/${vars.taskId}/subtasks`, {
+        method: "POST",
+        body: JSON.stringify({ title: vars.title }),
+      }),
+    onSuccess: (res) => {
+      replaceTask(res.task)
+      qc.invalidateQueries({ queryKey: ["task-stats"] })
+    },
+  })
+
+  const patch = useMutation({
+    mutationFn: (vars: {
+      taskId: string
+      subtaskId: string
+      title?: string
+      completed?: boolean
+      /** Indice cible 0-based → renormalisation serveur. */
+      position?: number
+    }) =>
+      api<SubtaskMutationResult>(
+        `/api/tasks/${vars.taskId}/subtasks/${vars.subtaskId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            ...(vars.title !== undefined ? { title: vars.title } : {}),
+            ...(vars.completed !== undefined ? { completed: vars.completed } : {}),
+            ...(vars.position !== undefined ? { position: vars.position } : {}),
+          }),
+        }
+      ),
+    onSuccess: (res) => {
+      replaceTask(res.task)
+      qc.invalidateQueries({ queryKey: ["task-stats"] })
+    },
+  })
+
   const remove = useMutation({
-    mutationFn: (id: string) => api<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }),
+    mutationFn: (vars: { taskId: string; subtaskId: string }) =>
+      api<SubtaskMutationResult>(
+        `/api/tasks/${vars.taskId}/subtasks/${vars.subtaskId}`,
+        { method: "DELETE" }
+      ),
+    onSuccess: (res) => {
+      replaceTask(res.task)
+      qc.invalidateQueries({ queryKey: ["task-stats"] })
+    },
+  })
+
+  return { add, patch, remove }
+}
+
+// ---------- Tags (mutations) ----------
+
+export function useTagMutations() {
+  const qc = useQueryClient()
+
+  /** Un tag renommé/supprimé change les tags embarqués dans les tâches :
+   *  on invalide aussi ["tasks"] (la DELETE détache sans toucher les tâches). */
+  const invalidate = useInvalidateTaskData()
+
+  const create = useMutation({
+    mutationFn: (vars: { name: string; color: string }) =>
+      api<{ tag: TagDto }>("/api/tags", {
+        method: "POST",
+        body: JSON.stringify(vars),
+      }),
+    onSuccess: invalidate,
+  })
+
+  const update = useMutation({
+    mutationFn: (vars: { id: string; name?: string; color?: string }) =>
+      api<{ tag: TagDto }>(`/api/tags/${vars.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(vars),
+      }),
+    onSuccess: invalidate,
+  })
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api<{ ok: boolean }>(`/api/tags/${id}`, { method: "DELETE" }),
     onSuccess: invalidate,
   })
 
