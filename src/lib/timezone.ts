@@ -108,7 +108,8 @@ export function getBrowserTimezone(): string {
 
 /** Libellé court d'un fuseau pour l'UI (ex. « UTC+2 — Europe/Paris »). */
 export function timezoneLabel(tz: string, at: Date = new Date()): string {
-  const offset = tzOffsetMs(at, tz)
+  // Arrondi à la minute (l'offset Intl peut porter des sous-secondes)
+  const offset = Math.round(tzOffsetMs(at, tz) / 60_000) * 60_000
   const sign = offset < 0 ? "-" : "+"
   const abs = Math.abs(offset)
   const h = String(Math.floor(abs / 3_600_000)).padStart(2, "0")

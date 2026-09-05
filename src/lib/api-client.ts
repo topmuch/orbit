@@ -10,6 +10,8 @@ import {
 import type {
   SessionUser,
   EventDto,
+  EventCreateInput,
+  EventImportResult,
   TaskDto,
   EmailDto,
   EventSuggestion,
@@ -78,61 +80,159 @@ export function useAuthMutations() {
 
 // ---------- Événements ----------
 
-export function useEvents(from?: Date, to?: Date) {
+/** Entrée de création/édition d'événement (contrat riche — types gelés). */
+export type EventInput = EventCreateInput
+
+/** Réponse POST/PATCH /api/events : conflits = avertissement NON bloquant. */
+export type EventMutationResult = {
+  event: EventDto
+  /** Uniquement pour scope "single" : master avec exception appliquée. */
+  master?: EventDto | null
+  conflicts: EventDto[]
+}
+
+/** Réponse DELETE /api/events/:id. */
+export type EventDeleteResult = { ok: boolean; master?: EventDto | null }
+
+/** Portée d'une modification/suppression sur une série récurrente. */
+export type EventScope = "single" | "series"
+
+async function fetchEvents(
+  isoStart: string | undefined,
+  isoEnd: string | undefined
+): Promise<{ events: EventDto[] }> {
   const params = new URLSearchParams()
-  if (from) params.set("from", from.toISOString())
-  if (to) params.set("to", to.toISOString())
+  if (isoStart) params.set("start", isoStart)
+  if (isoEnd) params.set("end", isoEnd)
   const qs = params.toString()
+  return api<{ events: EventDto[] }>(`/api/events${qs ? `?${qs}` : ""}`)
+}
+
+/** Événements (occurrences expansées) d'une plage [start, end]. */
+export function useEventsRange(start?: Date, end?: Date) {
+  const isoStart = start?.toISOString()
+  const isoEnd = end?.toISOString()
   return useQuery<{ events: EventDto[] }>({
-    queryKey: ["events", from?.toISOString() ?? "", to?.toISOString() ?? ""],
-    queryFn: () => api<{ events: EventDto[] }>(`/api/events${qs ? `?${qs}` : ""}`),
+    queryKey: ["events", "range", isoStart ?? "", isoEnd ?? ""],
+    queryFn: () => fetchEvents(isoStart, isoEnd),
   })
 }
 
-export type EventInput = {
-  title: string
-  description?: string
-  startTime: string
-  endTime: string
-  source?: "manual" | "email_extract" | "ai"
+/** Alias legacy : useEvents(from, to) — même queryFn/queryKey que useEventsRange
+ *  (les paramètres historiques from/to sont convertis en instants ISO). */
+export function useEvents(from?: Date, to?: Date) {
+  return useEventsRange(from, to)
 }
 
 export function useEventMutations() {
   const qc = useQueryClient()
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["events"] })
-  const invalidateStats = () => qc.invalidateQueries({ queryKey: ["stats"] })
+  const invalidateAll = () => {
+    qc.invalidateQueries({ queryKey: ["events"] })
+    qc.invalidateQueries({ queryKey: ["stats"] })
+    // Un rappel de type "email" peut créer un EmailLog → rafraîchir la boîte.
+    qc.invalidateQueries({ queryKey: ["emails"] })
+  }
 
   const create = useMutation({
     mutationFn: (input: EventInput) =>
-      api<{ event: EventDto }>("/api/events", {
+      api<EventMutationResult>("/api/events", {
         method: "POST",
         body: JSON.stringify(input),
       }),
-    onSuccess: () => {
-      invalidate()
-      invalidateStats()
-    },
+    onSuccess: invalidateAll,
   })
+
   const update = useMutation({
-    mutationFn: (vars: { id: string; input: Partial<EventInput> }) =>
-      api<{ event: EventDto }>(`/api/events/${vars.id}`, {
+    mutationFn: (vars: {
+      id: string
+      input: Partial<EventInput>
+      scope?: EventScope
+      occurrenceStart?: string
+    }) =>
+      api<EventMutationResult>(`/api/events/${vars.id}`, {
         method: "PATCH",
-        body: JSON.stringify(vars.input),
+        // scope/occurrenceStart voyagent DANS le body JSON (contrat backend).
+        body: JSON.stringify({
+          ...vars.input,
+          ...(vars.scope !== undefined ? { scope: vars.scope } : {}),
+          ...(vars.occurrenceStart !== undefined
+            ? { occurrenceStart: vars.occurrenceStart }
+            : {}),
+        }),
       }),
-    onSuccess: () => {
-      invalidate()
-      invalidateStats()
-    },
+    onSuccess: invalidateAll,
   })
+
   const remove = useMutation({
-    mutationFn: (id: string) => api<{ ok: boolean }>(`/api/events/${id}`, { method: "DELETE" }),
-    onSuccess: () => {
-      invalidate()
-      invalidateStats()
+    mutationFn: (vars: { id: string; scope?: EventScope; occurrenceStart?: string }) => {
+      // DELETE : scope/occurrenceStart passent en query string.
+      const params = new URLSearchParams()
+      if (vars.scope) params.set("scope", vars.scope)
+      if (vars.occurrenceStart) params.set("occurrenceStart", vars.occurrenceStart)
+      const qs = params.toString()
+      return api<EventDeleteResult>(`/api/events/${vars.id}${qs ? `?${qs}` : ""}`, {
+        method: "DELETE",
+      })
     },
+    onSuccess: invalidateAll,
   })
 
   return { create, update, remove }
+}
+
+/** Import iCal (multipart FormData, champ "file"). */
+export function useEventImport() {
+  const qc = useQueryClient()
+  return useMutation<EventImportResult, Error, File>({
+    // Pas de Content-Type JSON : le navigateur pose le boundary multipart.
+    mutationFn: async (file: File) => {
+      const fd = new FormData()
+      fd.append("file", file)
+      const res = await fetch("/api/events/import", { method: "POST", body: fd })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        throw new Error(body?.error ?? `Erreur ${res.status}`)
+      }
+      return res.json() as Promise<EventImportResult>
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["events"] })
+      qc.invalidateQueries({ queryKey: ["stats"] })
+      qc.invalidateQueries({ queryKey: ["emails"] })
+    },
+  })
+}
+
+/** Export iCal → téléchargement navigateur (fonction, pas un hook).
+ *  Retourne le nom du fichier téléchargé. */
+export async function exportEvents(range?: { start: Date; end: Date }): Promise<string> {
+  const params = new URLSearchParams()
+  if (range) {
+    params.set("start", range.start.toISOString())
+    params.set("end", range.end.toISOString())
+  }
+  const qs = params.toString()
+  const res = await fetch(`/api/events/export${qs ? `?${qs}` : ""}`)
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(body?.error ?? `Export impossible (erreur ${res.status})`)
+  }
+  const blob = await res.blob()
+  // Nom depuis Content-Disposition (attachment; filename="orbit-YYYYMMDD.ics"),
+  // sinon valeur par défaut équivalente.
+  const cd = res.headers.get("Content-Disposition") ?? ""
+  const filename =
+    /filename="([^"]+)"/.exec(cd)?.[1] ??
+    `orbit-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.ics`
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 5_000)
+  return filename
 }
 
 // ---------- Tâches ----------
@@ -316,14 +416,20 @@ export function useStats() {
 
 // ---------- Profil ----------
 
+/** Réponse PATCH /api/profile (le DTO porte le fuseau en plus de la session). */
+export type ProfileUser = SessionUser & { timezone?: string | null }
+
 export function useProfileMutation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (name: string) =>
-      api<{ user: SessionUser }>("/api/profile", {
+    // Compat : l'appel historique par `name` seul (string) reste accepté.
+    mutationFn: (vars: string | { name?: string; timezone?: string }) => {
+      const body = typeof vars === "string" ? { name: vars } : vars
+      return api<{ user: ProfileUser }>("/api/profile", {
         method: "PATCH",
-        body: JSON.stringify({ name }),
-      }),
+        body: JSON.stringify(body),
+      })
+    },
     onSuccess: () => {
       qc.setQueryData(["session"], undefined)
       qc.invalidateQueries({ queryKey: ["session"] })

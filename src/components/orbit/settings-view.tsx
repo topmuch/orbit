@@ -12,12 +12,16 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import { useProfileMutation, useAuthMutations, useAIStatus, usePushStatus, usePushMutations } from "@/lib/api-client"
+import { useTimezone } from "@/hooks/useTimezone"
+import { TimezoneSelector } from "@/components/orbit/timezone-selector"
+import { timezoneLabel } from "@/lib/timezone"
 import { usePwaStore } from "@/lib/pwa-store"
 import { promptInstall } from "@/components/orbit/pwa-register"
 import { DesignSystemShowcase } from "@/components/orbit/design-system-showcase"
 import type { SessionUser } from "@/lib/types"
 import {
   User,
+  Globe,
   Palette,
   Bell,
   BellRing,
@@ -42,6 +46,10 @@ export function SettingsView({ user }: { user: SessionUser }) {
   const { theme, setTheme } = useTheme()
   const { online, canInstall, installed, swReady } = usePwaStore()
   const profile = useProfileMutation()
+  // 12-c : fuseau d'affichage du calendrier (instance useTimezone + persistance
+  // profil via PATCH /api/profile — cf. useTimezone ; l'affichage de chaque vue
+  // reste piloté par sa propre instance, la préférence sert au serveur/stats).
+  const { timezone, setTimezone } = useTimezone()
   const { logout } = useAuthMutations()
   const aiStatus = useAIStatus()
   const pushStatus = usePushStatus()
@@ -150,6 +158,28 @@ export function SettingsView({ user }: { user: SessionUser }) {
                 Enregistrer
               </Button>
             </form>
+          </CardContent>
+        </Card>
+
+        {/* ---------- Préférences d'affichage (fuseau) ---------- */}
+        <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base font-medium">
+              <Globe className="size-4 text-primary" aria-hidden />
+              Préférences d&apos;affichage
+            </CardTitle>
+            <CardDescription>Fuseau horaire du calendrier et des heures.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="settings-timezone">Fuseau horaire</Label>
+              <TimezoneSelector id="settings-timezone" value={timezone} onChange={setTimezone} />
+              <p className="text-xs text-muted-foreground">{timezoneLabel(timezone)}</p>
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Les événements sont stockés en UTC et affichés dans ce fuseau. Chaque
+              événement peut avoir son propre fuseau (défini lors de sa création).
+            </p>
           </CardContent>
         </Card>
 

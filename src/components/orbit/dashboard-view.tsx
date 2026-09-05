@@ -3,15 +3,17 @@
 // Orbit — Tableau de bord : vue d'ensemble de la journée
 
 import { useState } from "react"
-import { addDays, format, isBefore, isToday, parseISO, startOfDay } from "date-fns"
+import { format, isBefore, isToday, parseISO } from "date-fns"
 import { fr } from "date-fns/locale"
 import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
+import { EventCard, eventKeyOf } from "@/components/orbit/event-card"
 import { EventDialog } from "@/components/orbit/event-dialog"
 import { TaskDialog } from "@/components/orbit/task-dialog"
+import { useTimezone } from "@/hooks/useTimezone"
 import {
   useStats,
   useTaskMutations,
@@ -42,15 +44,9 @@ function greeting(): string {
   return "Bonsoir"
 }
 
-function SourceBadge({ source }: { source: string }) {
-  if (source === "manual") return null
-  return (
-    <Badge variant="secondary" className="gap-1 px-1.5 text-[10px] font-normal">
-      {source === "email_extract" ? <Mail className="size-2.5" aria-hidden /> : <Sparkles className="size-2.5" aria-hidden />}
-      {source === "email_extract" ? "email" : "IA"}
-    </Badge>
-  )
-}
+// Jours de semaine pour le graphe « semaine à venir » (0 = lundi).
+const WEEKDAY_SHORT = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"] as const
+const WEEKDAY_LONG = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"] as const
 
 export function DashboardView({
   user,
@@ -62,6 +58,8 @@ export function DashboardView({
   const { data, isLoading } = useStats()
   const { update: updateTask } = useTaskMutations()
   const { sync } = useEmailMutations()
+  // 12-c : heures formatées dans le fuseau d'affichage (RÈGLE D'OR UTC).
+  const { fmt, dayKey } = useTimezone()
 
   const [eventDialogOpen, setEventDialogOpen] = useState(false)
   const [editEvent, setEditEvent] = useState<EventDto | null>(null)
@@ -69,6 +67,10 @@ export function DashboardView({
 
   const stats = data?.stats
   const now = new Date()
+  // « aujourd'hui » (clé yyyy-MM-dd) dans le fuseau d'affichage — cohérent
+  // avec les clés weekLoad du serveur (fuseau du profil, synchronisé via
+  // setTimezone → PATCH /api/profile).
+  const todayKey = dayKey(now)
 
   const firstName = (user.name ?? user.email).split(/[\s@]/)[0]
   const dateLabel = format(now, "EEEE d MMMM", { locale: fr })
@@ -110,7 +112,7 @@ export function DashboardView({
                 {" · "}
                 <span className="normal-case">
                   Prochain : {stats.nextEvent.title} à{" "}
-                  {format(parseISO(stats.nextEvent.startTime), "HH:mm", { locale: fr })}
+                  {fmt(parseISO(stats.nextEvent.startTime), "HH:mm")}
                 </span>
               </>
             )}
@@ -148,7 +150,7 @@ export function DashboardView({
                 <p className="mt-2 text-sm font-medium">Événements aujourd&apos;hui</p>
                 <p className="text-xs text-muted-foreground">
                   {stats.eventsToday > 0
-                    ? `de ${format(parseISO(stats.todayEvents[0].startTime), "HH:mm")} à ${format(parseISO(stats.todayEvents[stats.todayEvents.length - 1].endTime), "HH:mm")}`
+                    ? `de ${fmt(parseISO(stats.todayEvents[0].startTime), "HH:mm")} à ${fmt(parseISO(stats.todayEvents[stats.todayEvents.length - 1].endTime), "HH:mm")}`
                     : "Journée libre"}
                 </p>
               </CardContent>
@@ -215,8 +217,15 @@ export function DashboardView({
           ) : (
             <div className="grid grid-cols-7 items-end gap-1 sm:gap-2">
               {stats.weekLoad.map((d) => {
-                const date = parseISO(d.date)
-                const today = isToday(date)
+                // d.date = clé "yyyy-MM-dd" calculée côté serveur DANS le fuseau
+                // du profil : on décompose la CHAÎNE (parts[2] = jour, lookup du
+                // jour de semaine par index) au lieu de new Date(key) — le parseur
+                // de "yyyy-MM-dd" le traite comme minuit UTC, qui devient
+                // 22:00/20:00 la veille en Europe/Paris / New-York et
+                // décalerait le nom du jour affiché d'un cran.
+                const [y, m, dayNum] = d.date.split("-").map(Number)
+                const weekdayIdx = (new Date(Date.UTC(y, m - 1, dayNum)).getUTCDay() + 6) % 7
+                const today = d.date === todayKey
                 const maxCount = Math.max(...stats.weekLoad.map((x) => x.count), 1)
                 const h = d.count === 0 ? 4 : Math.max(10, (d.count / maxCount) * 56)
                 return (
@@ -228,10 +237,10 @@ export function DashboardView({
                       className={`w-full max-w-10 rounded-md transition-all ${today ? "bg-primary" : d.count > 0 ? "bg-primary/50" : "bg-muted"}`}
                       style={{ height: `${h}px` }}
                       role="img"
-                      aria-label={`${format(date, "EEEE", { locale: fr })} : ${d.count} événement(s)`}
+                      aria-label={`${WEEKDAY_LONG[weekdayIdx]} : ${d.count} événement(s)`}
                     />
                     <span className={`text-[11px] font-medium ${today ? "text-primary" : "text-muted-foreground"}`}>
-                      {format(date, "EEE", { locale: fr })}
+                      {WEEKDAY_SHORT[weekdayIdx]}
                     </span>
                   </div>
                 )
@@ -267,33 +276,20 @@ export function DashboardView({
               </button>
             ) : (
               stats.todayEvents.map((ev) => {
-                const start = parseISO(ev.startTime)
-                const end = parseISO(ev.endTime)
-                const past = isBefore(end, now)
+                // Carte partagée EventCard (12-c) : pastille couleur = couleur
+                // d'événement ou par source, heures dans le fuseau d'affichage.
+                const past = isBefore(parseISO(ev.endTime), now)
                 return (
-                  <button
-                    key={ev.id}
+                  <EventCard
+                    key={eventKeyOf(ev)}
+                    event={ev}
+                    compact
+                    muted={past}
                     onClick={() => {
                       setEditEvent(ev)
                       setEventDialogOpen(true)
                     }}
-                    className={`flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors hover:bg-accent/50 ${past ? "opacity-55" : ""}`}
-                  >
-                    <span className="w-12 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
-                      {format(start, "HH:mm")}
-                    </span>
-                    <span className={`h-9 w-1 shrink-0 rounded-full ${past ? "bg-muted" : "bg-primary/70"}`} aria-hidden />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5">
-                        <span className={`truncate text-sm font-medium ${past ? "line-through" : ""}`}>{ev.title}</span>
-                        <SourceBadge source={ev.source} />
-                      </span>
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {format(start, "HH:mm")}–{format(end, "HH:mm")}
-                        {ev.description ? ` · ${ev.description}` : ""}
-                      </span>
-                    </span>
-                  </button>
+                  />
                 )
               })
             )}

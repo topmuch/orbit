@@ -23,7 +23,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { useEmails, useEmailMutations, useEventMutations } from "@/lib/api-client"
+import { useEmails, useEmailMutations } from "@/lib/api-client"
+import { EventDialog } from "@/components/orbit/event-dialog"
+import { useTimezone } from "@/hooks/useTimezone"
 import type { EmailDto, OrbitView } from "@/lib/types"
 import {
   Inbox,
@@ -60,10 +62,13 @@ export function EmailsView({
 }) {
   const { data, isLoading } = useEmails()
   const { patch, remove, sync, analyze } = useEmailMutations()
-  const { create: createEvent } = useEventMutations()
+  // 12-c : heures de la suggestion formatées dans le fuseau d'affichage.
+  const { timezone, fmt } = useTimezone()
 
   const [search, setSearch] = useState("")
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Suggestion en cours de création via le dialog pré-rempli (12-c).
+  const [suggestDraft, setSuggestDraft] = useState<EmailDto | null>(null)
 
   const emails = data?.emails ?? []
   const filtered = search
@@ -78,7 +83,13 @@ export function EmailsView({
     : emails
 
   const selected = emails.find((e) => e.id === selectedId) ?? null
-  const creating = createEvent.isPending
+
+  /** Description pré-remplie du dialog : suggestion + traçabilité de l'email. */
+  function suggestionDescription(email: EmailDto): string {
+    const s = email.suggestedEvent
+    if (!s) return ""
+    return `${s.description}\n\n(Source : email de ${email.fromName ?? email.fromAddress} — « ${email.subject} »)`.trim()
+  }
 
   function handleSelect(email: EmailDto) {
     onSelect(email.id)
@@ -98,29 +109,6 @@ export function EmailsView({
           description: "Vérifiez la suggestion puis confirmez.",
         })
       }
-    } catch (err) {
-      toast.error((err as Error).message)
-    }
-  }
-
-  async function handleCreateEvent(email: EmailDto) {
-    const s = email.suggestedEvent
-    if (!s) return
-    try {
-      await createEvent.mutateAsync({
-        title: s.title,
-        description: `${s.description}\n\n(Source : email de ${email.fromName ?? email.fromAddress} — « ${email.subject} »)`.trim(),
-        startTime: s.startTime,
-        endTime: s.endTime,
-        source: "email_extract",
-      })
-      await patch.mutateAsync({ id: email.id, isProcessed: true })
-      toast.success("Événement ajouté au calendrier", {
-        description: `${format(parseISO(s.startTime), "EEEE d MMMM 'à' HH:mm", { locale: fr })}`,
-        action: onNavigate
-          ? { label: "Voir", onClick: () => onNavigate("calendar") }
-          : undefined,
-      })
     } catch (err) {
       toast.error((err as Error).message)
     }
@@ -304,9 +292,9 @@ export function EmailsView({
           ) : selected.suggestedEvent ? (
             <SuggestionCard
               suggestion={selected.suggestedEvent}
-              onCreate={() => handleCreateEvent(selected)}
+              onCreate={() => setSuggestDraft(selected)}
               onDismiss={() => handleDismiss(selected)}
-              creating={creating}
+              fmt={fmt}
             />
           ) : (
             <div className="rounded-xl border border-violet-500/25 bg-violet-500/5 p-4">
@@ -391,6 +379,27 @@ export function EmailsView({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* 12-c : création depuis une suggestion IA via le dialog pré-rempli
+          (titre, description, horaires de la suggestion, fuseau d'affichage,
+          source email_extract). L'email reste « à traiter » jusqu'à « Ignorer »
+          ou une analyse — choix explicite plutôt qu'un traitement automatique. */}
+      <EventDialog
+        open={suggestDraft !== null}
+        onOpenChange={(open) => {
+          if (!open) setSuggestDraft(null)
+        }}
+        defaultDate={
+          suggestDraft?.suggestedEvent ? new Date(suggestDraft.suggestedEvent.startTime) : undefined
+        }
+        defaultEnd={
+          suggestDraft?.suggestedEvent ? new Date(suggestDraft.suggestedEvent.endTime) : undefined
+        }
+        defaultTitle={suggestDraft?.suggestedEvent?.title}
+        defaultDescription={suggestDraft ? suggestionDescription(suggestDraft) : undefined}
+        defaultTimezone={timezone}
+        source="email_extract"
+      />
     </div>
   )
 }
@@ -399,13 +408,15 @@ function SuggestionCard({
   suggestion,
   onCreate,
   onDismiss,
-  creating,
+  fmt,
 }: {
   suggestion: NonNullable<EmailDto["suggestedEvent"]>
   onCreate: () => void
   onDismiss: () => void
-  creating: boolean
+  fmt: (d: Date, p: string) => string
 }) {
+  const start = parseISO(suggestion.startTime)
+  const end = parseISO(suggestion.endTime)
   return (
     <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4">
       <div className="flex items-center gap-2">
@@ -424,9 +435,9 @@ function SuggestionCard({
           {suggestion.title}
         </p>
         <p className="mt-2 text-sm capitalize text-muted-foreground">
-          {format(parseISO(suggestion.startTime), "EEEE d MMMM yyyy", { locale: fr })} ·{" "}
-          {format(parseISO(suggestion.startTime), "HH:mm")} –{" "}
-          {format(parseISO(suggestion.endTime), "HH:mm")} ({durationLabel(suggestion.startTime, suggestion.endTime)})
+          {fmt(start, "EEEE d MMMM yyyy")} ·{" "}
+          {fmt(start, "HH:mm")} –{" "}
+          {fmt(end, "HH:mm")} ({durationLabel(suggestion.startTime, suggestion.endTime)})
         </p>
         {suggestion.description && (
           <p className="mt-2 text-sm text-foreground/80">{suggestion.description}</p>
@@ -434,15 +445,11 @@ function SuggestionCard({
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button size="sm" onClick={onCreate} disabled={creating}>
-          {creating ? (
-            <Loader2 className="size-4 animate-spin" aria-hidden />
-          ) : (
-            <CalendarPlus className="size-4" aria-hidden />
-          )}
+        <Button size="sm" onClick={onCreate}>
+          <CalendarPlus className="size-4" aria-hidden />
           Créer l&apos;événement
         </Button>
-        <Button size="sm" variant="ghost" onClick={onDismiss} disabled={creating}>
+        <Button size="sm" variant="ghost" onClick={onDismiss}>
           <X className="size-4" aria-hidden />
           Ignorer
         </Button>

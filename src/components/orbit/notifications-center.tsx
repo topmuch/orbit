@@ -1,10 +1,15 @@
-"use client";
+"use client"
 
 // Orbit — Centre de notifications (calculé en direct depuis les données)
 // Événements imminents, tâches en retard/urgentes, emails en attente d'analyse.
+// 12-c : les événements < 24 h viennent de useEventsRange(now, +24 h) — une
+// PLAGE EXPANSE les occurrences des récurrences (l'ancien useEvents() sans
+// plage ne renvoyait que les masters) et les heures sont formatées dans le
+// fuseau d'affichage (useTimezone().fmt — jamais de format date-fns direct
+// sur un instant UTC).
 
-import { addHours, format, isBefore, parseISO } from "date-fns"
-import { fr } from "date-fns/locale"
+import { useEffect, useMemo, useState } from "react"
+import { addHours, isBefore, parseISO } from "date-fns"
 import {
   Sheet,
   SheetContent,
@@ -16,7 +21,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { useEvents, useTasks, useEmails } from "@/lib/api-client"
+import { useEventsRange, useTasks, useEmails } from "@/lib/api-client"
+import { useTimezone } from "@/hooks/useTimezone"
 import type { OrbitView } from "@/lib/types"
 import {
   Bell,
@@ -41,26 +47,37 @@ export function NotificationCenter({
 }: {
   onNavigate: (view: OrbitView) => void
 }) {
-  const { data: eventsData } = useEvents()
+  // Plage [maintenant, +24 h] re-cléée chaque minute : occurrences expansées
+  // incluses, sans boucle de refetch (la clé ne change qu'au tick de 60 s).
+  const [nowTick, setNowTick] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(new Date()), 60_000)
+    return () => window.clearInterval(id)
+  }, [])
+  const until = useMemo(() => addHours(nowTick, 24), [nowTick])
+
+  const { data: eventsData } = useEventsRange(nowTick, until)
   const { data: tasksData } = useTasks()
   const { data: emailsData } = useEmails()
+  const { fmt } = useTimezone()
 
   const now = new Date()
   const items: NotificationItem[] = []
 
-  // Événements dans les 24 prochaines heures
+  // Événements dans les 24 prochaines heures (occurrences incluses — la clé
+  // d'item embarque l'instant de début pour rester unique par occurrence).
   for (const ev of eventsData?.events ?? []) {
     const start = parseISO(ev.startTime)
     if (start >= now && start <= addHours(now, 24)) {
       const isSoon = start <= addHours(now, 2)
       items.push({
-        id: `event-${ev.id}`,
+        id: `event-${ev.id}-${ev.startTime}`,
         icon: isSoon ? AlarmClock : CalendarClock,
         className: isSoon
           ? "bg-red-500/15 text-red-500"
           : "bg-primary/15 text-primary",
         title: ev.title,
-        description: `${start <= addHours(now, 2) ? "Imminent" : "À venir"} · ${format(start, "EEEE d MMMM 'à' HH:mm", { locale: fr })}`,
+        description: `${isSoon ? "Imminent" : "À venir"} · ${fmt(start, "EEEE d MMMM 'à' HH:mm")}`,
         view: "calendar",
       })
     }
@@ -76,7 +93,7 @@ export function NotificationCenter({
         icon: CircleAlert,
         className: "bg-red-500/15 text-red-500",
         title: task.title,
-        description: `En retard · échéance ${format(due, "EEE d MMM 'à' HH:mm", { locale: fr })}`,
+        description: `En retard · échéance ${fmt(due, "EEE d MMM 'à' HH:mm")}`,
         view: "tasks",
       })
     } else if (due <= addHours(now, 24)) {
@@ -85,7 +102,7 @@ export function NotificationCenter({
         icon: CalendarClock,
         className: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
         title: task.title,
-        description: `À traiter aujourd'hui · ${format(due, "HH:mm", { locale: fr })}`,
+        description: `À traiter aujourd'hui · ${fmt(due, "HH:mm")}`,
         view: "tasks",
       })
     }
