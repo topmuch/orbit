@@ -257,3 +257,19 @@ Work Log:
 Stage Summary:
 - État final : main local == origin/main (a5cd476), git status propre, secrets toujours absents du dépôt, fichiers sandbox/env/db intacts sur disque
 - Racine du désynchronisement identifiée et neutralisée : auto-commits plateforme + chmod 755 sandbox (core.fileMode=false)
+
+---
+Task ID: 11-bis (main)
+Agent: main (Z.ai Code)
+Task: Réparation post-restauration snapshot (.env vidé, reminder-service down) — suite de la synchronisation
+
+Work Log:
+- Symptôme : reminder-service :3032 injoignable → cause : .env réduit à DATABASE_URL seul (restauration snapshot de la plateforme) → REMINDER_SERVICE_SECRET manquant → arrêt immédiat du service
+- Récupération des secrets originaux depuis l'objet store git (commit pré-squash 5daae0a accessible via reflog) : git show 5daae0a:.env → DATABASE_URL vérifiée identique (md5) puis restauration complète (AUTH_SECRET, VAPID_PUBLIC_KEY/PRIVATE_KEY/SUBJECT, REMINDER_SERVICE_SECRET, NEXT_PUBLIC_APP_NAME) — valeurs identiques à l'original, cookies de session existants toujours valides
+- reminder-service relancé (bun run dev, log dans mini-services/reminder-service/reminder-service.log — couvert par *.log du .gitignore) → /health OK (runCount 1, errorCount 0, cycle 60 s actif)
+- Vérifications : POST /api/auth/demo → Alex Martin + cookie OK ; GET /api/subscribe (session) → configured:true + publicKey VAPID (le process Next.js a bien les secrets en mémoire) ; DB intacte (1 user, 10 events, 9 tasks, 7 emails) ; pushSubscriptions:0 (la fake subscription des tests mock a disparu avec le snapshot — état plus propre)
+- git status 100 % propre (0 entrée) ; local == origin/main
+
+Stage Summary:
+- Environnement local intégralement réparé : .env original restauré depuis l'historique git (aucun secret régénéré, aucune donnée perdue), 3 services UP (:3000, :3031, :3032), DB complète
+- Local et GitHub parfaitement synchronisés sur d25915a (statut clean, 0/0)
