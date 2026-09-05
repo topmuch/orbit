@@ -239,3 +239,33 @@ export const chatSchema = z.object({
 export const analyzeSchema = z.object({
   emailId: z.string().min(1),
 })
+
+// ── IA locale : suggestion de priorité ──────────────────────────────────────
+// Deux modes exclusifs : { taskId } (édition → suggestion persistée sur la
+// tâche) OU { title } (création → suggestion jetable appliquée au formulaire).
+export const suggestPrioritySchema = z
+  .object({
+    taskId: z.string().min(1).optional(),
+    title: z.string().min(1).max(200).optional(),
+    description: z.string().max(4000).optional(),
+    dueDate: z
+      .string()
+      .refine((v) => !v || !Number.isNaN(Date.parse(v)), "Date invalide")
+      .optional(),
+  })
+  .refine((v) => Boolean(v.taskId) || Boolean(v.title?.trim()), {
+    message: "taskId ou title requis",
+  })
+
+// ── IA locale : synthèse de contenu ─────────────────────────────────────────
+// { emailId } (email de la boîte de réception) OU { content } (texte libre).
+export const summarizeSchema = z
+  .object({
+    emailId: z.string().min(1).optional(),
+    content: z.string().min(200).max(12000).optional(),
+    style: z.enum(["bullet_points", "paragraph", "key_points"]).default("bullet_points"),
+    maxLength: z.coerce.number().int().min(30).max(600).default(150),
+  })
+  .refine((v) => Boolean(v.emailId) || Boolean(v.content?.trim()), {
+    message: "emailId ou content requis",
+  })

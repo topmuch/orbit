@@ -41,7 +41,11 @@ import {
   Check,
   ArrowLeft,
   ScanSearch,
+  FileText,
+  MapPin,
+  Users,
 } from "lucide-react"
+import { AiSummaryDialog } from "@/components/orbit/ai/ai-summary-dialog"
 
 function durationLabel(startISO: string, endISO: string): string {
   const mins = differenceInMinutes(parseISO(endISO), parseISO(startISO))
@@ -67,6 +71,8 @@ export function EmailsView({
 
   const [search, setSearch] = useState("")
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Email en cours de synthèse IA (dialog « Résumer »).
+  const [summaryEmail, setSummaryEmail] = useState<EmailDto | null>(null)
   // Suggestion en cours de création via le dialog pré-rempli (12-c).
   const [suggestDraft, setSuggestDraft] = useState<EmailDto | null>(null)
 
@@ -283,6 +289,22 @@ export function EmailsView({
             {selected.bodyText}
           </div>
 
+          {/* Synthèse IA (contenus longs) */}
+          {selected.bodyText.trim().length >= 200 ? (
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300"
+                onClick={() => setSummaryEmail(selected)}
+              >
+                <FileText className="size-3.5" aria-hidden />
+                Résumer avec l&apos;IA
+              </Button>
+            </div>
+          ) : null}
+
           {/* Zone IA */}
           {selected.isProcessed && !selected.suggestedEvent ? (
             <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/40 p-4 text-sm text-muted-foreground">
@@ -397,8 +419,24 @@ export function EmailsView({
         }
         defaultTitle={suggestDraft?.suggestedEvent?.title}
         defaultDescription={suggestDraft ? suggestionDescription(suggestDraft) : undefined}
+        defaultLocation={suggestDraft?.suggestedEvent?.location ?? undefined}
+        defaultAttendees={suggestDraft?.suggestedEvent?.attendees}
         defaultTimezone={timezone}
         source="email_extract"
+      />
+
+      {/* Synthèse IA de l'email sélectionné (objet + corps) */}
+      <AiSummaryDialog
+        open={summaryEmail !== null}
+        onOpenChange={(open) => {
+          if (!open) setSummaryEmail(null)
+        }}
+        content={
+          summaryEmail
+            ? [summaryEmail.subject, summaryEmail.bodyText].filter(Boolean).join("\n\n")
+            : ""
+        }
+        contextLabel="cet email"
       />
     </div>
   )
@@ -439,6 +477,24 @@ function SuggestionCard({
           {fmt(start, "HH:mm")} –{" "}
           {fmt(end, "HH:mm")} ({durationLabel(suggestion.startTime, suggestion.endTime)})
         </p>
+        {(suggestion.location || (suggestion.attendees?.length ?? 0) > 0) ? (
+          <div className="mt-2 space-y-1.5 text-sm">
+            {suggestion.location ? (
+              <p className="flex items-center gap-2 text-foreground/80">
+                <MapPin className="size-3.5 shrink-0 text-emerald-500/80" aria-hidden />
+                {suggestion.location}
+              </p>
+            ) : null}
+            {suggestion.attendees?.length ? (
+              <p className="flex items-center gap-2 text-foreground/80">
+                <Users className="size-3.5 shrink-0 text-emerald-500/80" aria-hidden />
+                <span className="min-w-0 truncate" title={suggestion.attendees.join(", ")}>
+                  {suggestion.attendees.join(", ")}
+                </span>
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         {suggestion.description && (
           <p className="mt-2 text-sm text-foreground/80">{suggestion.description}</p>
         )}

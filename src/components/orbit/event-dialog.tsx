@@ -303,6 +303,8 @@ export function EventDialog({
   defaultTitle,
   defaultDescription,
   defaultEnd,
+  defaultLocation,
+  defaultAttendees,
   occurrenceStart,
   source,
 }: {
@@ -319,6 +321,10 @@ export function EventDialog({
   defaultDescription?: string
   /** Instant de fin pré-rempli à la création (durée de la suggestion). */
   defaultEnd?: Date
+  /** Lieu pré-rempli à la création (extraction IA de l'email). */
+  defaultLocation?: string
+  /** Participants pré-remplis à la création (emails extraits par l'IA). */
+  defaultAttendees?: string[]
   /** Début ISO UTC de l'occurrence visée si event est un master (repli sur event.occurrenceStart). */
   occurrenceStart?: string
   /** Source à la création (l'édition lit celle de l'événement). */
@@ -326,7 +332,7 @@ export function EventDialog({
 }) {
   const formKey = event
     ? `${event.id}:${event.occurrenceStart ?? occurrenceStart ?? ""}`
-    : `new:${defaultDate?.toISOString() ?? ""}:${defaultTimezone ?? ""}:${defaultTitle ?? ""}`
+    : `new:${defaultDate?.toISOString() ?? ""}:${defaultTimezone ?? ""}:${defaultTitle ?? ""}:${defaultLocation ?? ""}:${defaultAttendees?.length ?? 0}`
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -339,6 +345,8 @@ export function EventDialog({
           defaultTitle={defaultTitle}
           defaultDescription={defaultDescription}
           defaultEnd={defaultEnd}
+          defaultLocation={defaultLocation}
+          defaultAttendees={defaultAttendees}
           occurrenceStart={occurrenceStart}
           source={source}
           onDone={() => onOpenChange(false)}
@@ -366,6 +374,8 @@ function EventForm({
   defaultTitle,
   defaultDescription,
   defaultEnd,
+  defaultLocation,
+  defaultAttendees,
   occurrenceStart,
   source,
   onDone,
@@ -376,6 +386,8 @@ function EventForm({
   defaultTitle?: string
   defaultDescription?: string
   defaultEnd?: Date
+  defaultLocation?: string
+  defaultAttendees?: string[]
   occurrenceStart?: string
   source?: EventSource
   onDone: () => void
@@ -427,7 +439,7 @@ function EventForm({
     !event?.allDay && endWall0 ? wallTimeStr(endWall0) : addHour(wallTimeStr(startWall0))
   )
   const [timezone, setTimezone] = useState(initialTz)
-  const [location, setLocation] = useState(event?.location ?? "")
+  const [location, setLocation] = useState(event?.location ?? defaultLocation ?? "")
   const [description, setDescription] = useState(
     event?.description ?? defaultDescription ?? ""
   )
@@ -460,7 +472,14 @@ function EventForm({
   )
 
   // -- Participants / rappels ----------------------------------------------
-  const [attendees, setAttendees] = useState<EventAttendee[]>(event?.attendees ?? [])
+  // Participants : édition → liste existante ; création depuis une suggestion
+  // IA → emails extraits (statut initial « en attente »).
+  const [attendees, setAttendees] = useState<EventAttendee[]>(
+    event?.attendees ??
+      (defaultAttendees?.length
+        ? defaultAttendees.slice(0, 20).map((email) => ({ email, status: "pending" as const }))
+        : [])
+  )
   const [attendeesOpen, setAttendeesOpen] = useState(false)
   const [attEmail, setAttEmail] = useState("")
   const [attName, setAttName] = useState("")

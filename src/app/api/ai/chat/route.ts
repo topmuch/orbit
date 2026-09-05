@@ -14,6 +14,7 @@ import { chatSchema } from "@/lib/validators"
 import { chatCompletionStream } from "@/lib/ai-provider"
 import { loadExpandedEvents } from "@/lib/events-service"
 import { formatInTz } from "@/lib/timezone"
+import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 
 export const runtime = "nodejs"
 export const maxDuration = 60
@@ -21,6 +22,10 @@ export const maxDuration = 60
 export async function POST(req: NextRequest) {
   const user = await getSessionUser()
   if (!user) return NextResponse.json({ error: "Non authentifié" }, { status: 401 })
+
+  // Rate limit : 10 messages d'assistant par minute et par utilisateur.
+  const rl = rateLimit(`ai:chat:${user.id}`, 10, 60_000)
+  if (!rl.ok) return tooManyRequests(rl)
 
   const parsed = chatSchema.safeParse(await req.json())
   if (!parsed.success) {

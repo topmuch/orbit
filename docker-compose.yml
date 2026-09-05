@@ -5,24 +5,29 @@
 #
 # Démarrage complet :
 #   docker compose up -d
-#   # le premier démarrage télécharge llama3 (~4,7 Go) automatiquement
-#   # (sinon : ollama pull llama3)
+#   # le premier démarrage télécharge llama3.1:8b (~4,9 Go) automatiquement
+#   # (sinon : ollama pull llama3.1:8b)
 #
 # Le micro-service FastAPI expose sur http://localhost:3031 le MÊME contrat
 # REST que le mini-service bun de développement :
-#   GET /health · POST /analyze-email · POST /chat (streaming)
+#   GET /health · POST /analyze-email · POST /suggest-priority
+#   POST /summarize · POST /chat (streaming)
+# (les routes existent aussi sous le préfixe /api/ai/*)
 #
 # Côté Next.js, il suffit de définir dans .env :
 #   AI_SERVICE_URL=http://localhost:3031
 #   OLLAMA_URL=http://localhost:11434
-#   OLLAMA_MODEL=llama3
+#   OLLAMA_MODEL=llama3.1:8b
+#
+# Ressources conseillées : 8 Go RAM minimum (16 Go recommandés), 4 cœurs ;
+# GPU NVIDIA optionnel (10× plus rapide — décommenter la section deploy).
 # ───────────────────────────────────────────────────────────────────────────
 # En développement sandbox (sans Docker), l'équivalent est :
 #   mini-services/ai-service (bun --hot, port 3031, fallback z-ai-web-dev-sdk)
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
-  # ── Moteur d'inférence local (Llama 3 8B quantifié) ──────────────────────
+  # ── Moteur d'inférence local (Llama 3.1 8B quantifié) ────────────────────
   ollama:
     build: docker/ollama
     container_name: orbit-ollama
@@ -32,19 +37,24 @@ services:
     volumes:
       - ollama_models:/root/.ollama # les modèles persistent entre les redémarrages
     environment:
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      # Modèle utilisé par le micro-service IA :
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      # Modèles pré-téléchargés au démarrage (liste séparée par des espaces).
+      # Spec complète : "llama3.1:8b mistral:7b nomic-embed-text" (~12 Go).
+      OLLAMA_MODELS: ${OLLAMA_MODELS:-llama3.1:8b}
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q llama3 || exit 1"]
+      test: ["CMD-SHELL", "ollama list | grep -q \"${OLLAMA_MODEL:-llama3.1:8b}\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 120s # marge pour le téléchargement initial du modèle
-    # Décommenter pour accélérer l'inférence sur machine équipée :
+      start_period: 300s # marge pour le téléchargement initial du modèle (~4,9 Go)
+    # Décommenter pour accélérer l'inférence sur machine équipée (NVIDIA) :
     # deploy:
     #   resources:
     #     reservations:
     #       devices:
     #         - driver: nvidia
+    #           count: 1
     #           capabilities: [gpu]
 
   # ── Micro-service IA (FastAPI) — même contrat que mini-services/ai-service ─
@@ -56,11 +66,18 @@ services:
       - "3031:3031"
     environment:
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       OLLAMA_TIMEOUT_MS: "90000"
+      AI_CACHE_TTL_MS: "600000" # cache mémoire des réponses identiques (10 min)
     depends_on:
       ollama:
-        condition: service_healthy # on attend que llama3 soit prêt
+        condition: service_healthy # on attend que le modèle soit prêt
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:3031/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
 
 volumes:
   ollama_models:

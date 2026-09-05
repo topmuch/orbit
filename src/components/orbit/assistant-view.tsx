@@ -2,6 +2,7 @@
 
 // Orbit — Assistant IA conversationnel (streaming)
 // Le contexte (agenda + tâches) est injecté côté serveur dans /api/ai/chat.
+// L'état de la conversation vit dans le hook useAIChat (src/hooks/use-ai-chat.ts).
 
 import { useEffect, useRef, useState } from "react"
 import Markdown from "react-markdown"
@@ -11,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Textarea } from "@/components/ui/textarea"
 import { OrbitLogo } from "@/components/orbit/logo"
-import { streamAssistant } from "@/lib/api-client"
+import { useAIChat } from "@/hooks/use-ai-chat"
 import type { ChatMessage } from "@/lib/types"
 import {
   Send,
@@ -43,55 +44,19 @@ const SUGGESTIONS = [
 ]
 
 export function AssistantView() {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const { messages, streaming, streamText, sendMessage, clearChat } = useAIChat()
   const [input, setInput] = useState("")
-  const [streaming, setStreaming] = useState(false)
-  const [streamText, setStreamText] = useState("")
 
   const bottomRef = useRef<HTMLDivElement>(null)
-  const abortRef = useRef<AbortController | null>(null)
 
-  // Auto-scroll + abort propre au démontage
+  // Auto-scroll vers le dernier message
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
   }, [messages, streamText])
-  useEffect(() => () => abortRef.current?.abort(), [])
 
-  async function send(text: string) {
-    const content = text.trim()
-    if (!content || streaming) return
-
-    const history = [...messages, { role: "user" as const, content }]
-    setMessages(history)
+  function submit(text: string) {
     setInput("")
-    setStreaming(true)
-    setStreamText("")
-
-    const controller = new AbortController()
-    abortRef.current = controller
-
-    try {
-      // streamAssistant (src/lib/api-client.ts) délègue à /api/ai/chat,
-      // lui-même servi par le micro-service IA (Ollama local en production).
-      let acc = await streamAssistant(history, setStreamText, controller.signal)
-
-      if (!acc.trim()) acc = "*(réponse vide — reformulez votre demande)*"
-      setMessages((m) => [...m, { role: "assistant", content: acc }])
-    } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        setMessages((m) => [
-          ...m,
-          {
-            role: "assistant",
-            content: `⚠️ ${(err as Error).message ?? "Erreur de connexion à l'assistant."}`,
-          },
-        ])
-      }
-    } finally {
-      setStreaming(false)
-      setStreamText("")
-      abortRef.current = null
-    }
+    void sendMessage(text)
   }
 
   return (
@@ -114,7 +79,7 @@ export function AssistantView() {
             variant="ghost"
             size="sm"
             className="gap-1 text-muted-foreground"
-            onClick={() => setMessages([])}
+            onClick={clearChat}
           >
             <Trash2 className="size-4" aria-hidden />
             Réinitialiser
@@ -139,7 +104,7 @@ export function AssistantView() {
                 {SUGGESTIONS.map(({ icon: Icon, label, prompt }) => (
                   <button
                     key={label}
-                    onClick={() => send(prompt)}
+                    onClick={() => submit(prompt)}
                     className="flex flex-col items-center gap-2 rounded-xl border border-border/60 bg-card/60 p-4 text-sm transition-colors hover:border-primary/40 hover:bg-accent/40"
                   >
                     <Icon className="size-5 text-primary" aria-hidden />
@@ -181,7 +146,7 @@ export function AssistantView() {
         <form
           onSubmit={(e) => {
             e.preventDefault()
-            send(input)
+            submit(input)
           }}
           className="flex items-end gap-2 border-t border-border/60 p-3"
         >
@@ -191,7 +156,7 @@ export function AssistantView() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault()
-                send(input)
+                submit(input)
               }
             }}
             placeholder="Écrivez votre message… (Entrée pour envoyer)"

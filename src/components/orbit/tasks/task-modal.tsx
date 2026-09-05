@@ -67,10 +67,12 @@ import {
   CalendarDays,
   Circle,
   CircleDot,
+  FileText,
   Flame,
   ListTodo,
   Loader2,
   Plus,
+  Sparkles,
   Tag as TagIcon,
   Trash2,
   TriangleAlert,
@@ -85,6 +87,7 @@ import {
   foldText,
 } from "@/lib/tasks"
 import {
+  useAIPrioritySuggestion,
   useEvents,
   useTagMutations,
   useTags,
@@ -94,6 +97,7 @@ import type { TaskDto, TaskPriority, TaskStatus, TaskUpdateInput } from "@/lib/t
 import { PRIORITY_COLORS } from "@/components/orbit/tasks/priority-badge"
 import { SubtaskList, type LocalSubtask } from "@/components/orbit/tasks/subtask-list"
 import { EventDialog } from "@/components/orbit/event-dialog"
+import { AiSummaryDialog } from "@/components/orbit/ai/ai-summary-dialog"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constantes
@@ -171,6 +175,15 @@ export function TaskModal({
 // Formulaire
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Suggestion IA locale (priorité) — affichée dans la section dédiée du modal. */
+type LocalAiSuggestion = {
+  priority: TaskPriority
+  confidence: number
+  reasoning: string
+  /** true = lue depuis la base (persistée) ; false = suggestion fraîche. */
+  fromDb: boolean
+}
+
 function TaskForm({
   task,
   defaultStatus,
@@ -185,6 +198,7 @@ function TaskForm({
   const { create, update, removeHard } = useTaskMutations()
   const { data: tagsData } = useTags()
   const { create: createTag } = useTagMutations()
+  const aiSuggest = useAIPrioritySuggestion()
 
   // ----- Champs contrôlés (initialisation directe, zéro useEffect) -----
   const [title, setTitle] = useState(task?.title ?? "")
@@ -200,10 +214,21 @@ function TaskForm({
     () => task?.tags.map((t) => ({ name: t.name, color: t.color })) ?? []
   )
   const [eventId, setEventId] = useState<string | null>(task?.eventId ?? null)
-  // Suggestion IA locale (disparaît après « Appliquer »).
-  const [aiSuggestion, setAiSuggestion] = useState<TaskPriority | null>(
-    task?.aiSuggestedPriority ?? null
+  // Suggestion IA locale : priorité + confiance + raisonnement. Disparaît après
+  // « Appliquer » ou « Ignorer » (en édition, la suggestion est persistée en
+  // base via POST /api/ai/suggest-priority jusqu'à décision de l'utilisateur).
+  const [aiSuggestion, setAiSuggestion] = useState<LocalAiSuggestion | null>(
+    task?.aiSuggestedPriority
+      ? {
+          priority: task.aiSuggestedPriority,
+          confidence: task.aiConfidence ?? 0.5,
+          reasoning: "",
+          fromDb: true,
+        }
+      : null
   )
+  // Dialog de synthèse IA (descriptions longues, ≥ 400 caractères).
+  const [summaryOpen, setSummaryOpen] = useState(false)
   // Sous-tâches : mutations directes en édition (taskId), liste locale en création.
   const [localSubtasks, setLocalSubtasks] = useState<LocalSubtask[]>([])
 
@@ -221,7 +246,32 @@ function TaskForm({
     []
   )
   const { data: eventsData } = useEvents(eventsFrom, eventsTo)
-  const upcomingEvents = useMemo(() => eventsData?.events ?? [], [eventsData])
+  // Dédupliqué par id de série : une série récurrente expansée produit
+  // plusieurs occurrences partageant le même id maître — le Select lierait
+  // de toute façon la tâche au même événement (clés Radix dupliquées sinon).
+  // On garde, par série, l'occurrence la plus pertinente : la prochaine à
+  // venir, sinon la dernière passée (événements récents toujours affichés).
+  const upcomingEvents = useMemo(() => {
+    const all = [...(eventsData?.events ?? [])].sort(
+      (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+    )
+    const now = Date.now()
+    const upcoming = new Map<string, (typeof all)[number]>() // 1re occurrence à venir
+    const past = new Map<string, (typeof all)[number]>() // dernière occurrence passée
+    for (const ev of all) {
+      const t = new Date(ev.startTime).getTime()
+      if (t >= now) {
+        if (!upcoming.has(ev.id)) upcoming.set(ev.id, ev)
+      } else {
+        past.set(ev.id, ev) // itération croissante → garde la plus récente
+      }
+    }
+    const byId = new Map(past)
+    for (const [id, ev] of upcoming) byId.set(id, ev)
+    return [...byId.values()].sort(
+      (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+    )
+  }, [eventsData])
   const eventLabel = (iso: string) => format(new Date(iso), "EEE d MMM · HH:mm", { locale: fr })
 
   // ----- Tags : helpers -----
@@ -258,23 +308,78 @@ function TaskForm({
     }
   }
 
-  // ----- Section IA : appliquer la suggestion -----
+  // ----- Section IA : demander, appliquer, ignorer -----
+
+  const handleAskAi = async () => {
+    if (aiSuggest.isPending) return
+    const trimmedTitle = title.trim()
+    if (!task && !trimmedTitle) {
+      toast.error("Titre requis", {
+        description: "Renseignez au moins le titre de la tâche avant de demander une suggestion.",
+      })
+      return
+    }
+    try {
+      const res = await aiSuggest.mutateAsync(
+        task
+          ? { taskId: task.id }
+          : {
+              title: trimmedTitle,
+              description: description.trim() || null,
+              dueDate: dueDate ? new Date(dueDate).toISOString() : null,
+            }
+      )
+      const s = res.suggestion
+      setAiSuggestion({
+        priority: s.priority,
+        confidence: s.confidence,
+        reasoning: s.reasoning,
+        fromDb: s.persisted,
+      })
+    } catch (err) {
+      toast.error("Suggestion impossible", { description: errMessage(err) })
+    }
+  }
 
   const handleApplySuggestion = async () => {
-    if (!task || !aiSuggestion) return
-    try {
-      await update.mutateAsync({
-        id: task.id,
-        input: { priority: aiSuggestion, aiSuggestedPriority: null },
-      })
+    if (!aiSuggestion) return
+    if (task) {
+      try {
+        await update.mutateAsync({
+          id: task.id,
+          input: { priority: aiSuggestion.priority, aiSuggestedPriority: null },
+        })
+        toast.success("Suggestion appliquée", {
+          description: `Priorité mise à « ${TASK_PRIORITY_LABELS[aiSuggestion.priority]} ».`,
+        })
+      } catch (err) {
+        toast.error("Application impossible", { description: errMessage(err) })
+        return
+      }
+    } else {
       toast.success("Suggestion appliquée", {
-        description: `Priorité mise à « ${TASK_PRIORITY_LABELS[aiSuggestion]} ».`,
+        description: `Priorité mise à « ${TASK_PRIORITY_LABELS[aiSuggestion.priority]} » — pensez à enregistrer la tâche.`,
       })
-      setPriority(aiSuggestion)
-      setAiSuggestion(null)
-    } catch (err) {
-      toast.error("Application impossible", { description: errMessage(err) })
     }
+    setPriority(aiSuggestion.priority)
+    setAiSuggestion(null)
+  }
+
+  /** Ignorer : efface localement ET en base (sinon elle reviendrait à la réouverture). */
+  const handleDismissSuggestion = async () => {
+    if (task) {
+      try {
+        await update.mutateAsync({
+          id: task.id,
+          input: { aiSuggestedPriority: null },
+        })
+      } catch (err) {
+        toast.error("Suppression impossible", { description: errMessage(err) })
+        return
+      }
+    }
+    setAiSuggestion(null)
+    toast.info("Suggestion ignorée")
   }
 
   // ----- Suppression (hard delete, confirmée) -----
@@ -399,7 +504,21 @@ function TaskForm({
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="task-desc">Description (optionnel)</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="task-desc">Description (optionnel)</Label>
+                {description.trim().length >= 400 ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1.5 px-2 text-xs text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300"
+                    onClick={() => setSummaryOpen(true)}
+                  >
+                    <FileText className="size-3.5" aria-hidden="true" />
+                    Résumer avec l'IA
+                  </Button>
+                ) : null}
+              </div>
               <Textarea
                 id="task-desc"
                 value={description}
@@ -453,9 +572,26 @@ function TaskForm({
             </div>
           </div>
 
-          {/* ----- Priorité (4 cartes RadioGroup) ----- */}
+          {/* ----- Priorité (4 cartes RadioGroup + suggestion IA) ----- */}
           <fieldset className="space-y-2">
-            <legend className="text-sm font-medium">Priorité</legend>
+            <legend className="flex w-full items-center justify-between gap-2">
+              <span className="text-sm font-medium">Priorité</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-400 dark:hover:text-violet-300"
+                onClick={() => void handleAskAi()}
+                disabled={aiSuggest.isPending || saving}
+              >
+                {aiSuggest.isPending ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Sparkles className="size-3.5" aria-hidden="true" />
+                )}
+                {aiSuggest.isPending ? "Analyse en cours…" : "Suggérer avec l'IA"}
+              </Button>
+            </legend>
             <RadioGroup
               value={priority}
               onValueChange={(v) => setPriority(v as TaskPriority)}
@@ -662,25 +798,41 @@ function TaskForm({
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-violet-700 dark:text-violet-300">
                   L&apos;IA suggère : Priorité{" "}
-                  {TASK_PRIORITY_LABELS[aiSuggestion].toUpperCase()}
-                  {task?.aiConfidence != null ? (
-                    <span className="font-normal">
-                      {" "}
-                      (confiance {Math.round((task.aiConfidence ?? 0) * 100)} %)
-                    </span>
-                  ) : null}
+                  {TASK_PRIORITY_LABELS[aiSuggestion.priority].toUpperCase()}
+                  <span className="font-normal">
+                    {" "}
+                    (confiance {Math.round(aiSuggestion.confidence * 100)} %)
+                  </span>
                 </p>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="mt-2 h-8 gap-1.5 border-violet-500/40 text-violet-700 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200"
-                  disabled={saving}
-                  onClick={() => void handleApplySuggestion()}
-                >
-                  <Bot className="size-3.5" aria-hidden="true" />
-                  Appliquer
-                </Button>
+                {aiSuggestion.reasoning ? (
+                  <p className="mt-1 text-xs leading-relaxed text-violet-700/80 dark:text-violet-300/80">
+                    {aiSuggestion.reasoning}
+                  </p>
+                ) : null}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 gap-1.5 border-violet-500/40 text-violet-700 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200"
+                    disabled={saving}
+                    onClick={() => void handleApplySuggestion()}
+                  >
+                    <Bot className="size-3.5" aria-hidden="true" />
+                    Appliquer
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 gap-1 text-muted-foreground"
+                    disabled={saving}
+                    onClick={() => void handleDismissSuggestion()}
+                  >
+                    <X className="size-3.5" aria-hidden="true" />
+                    Ignorer
+                  </Button>
+                </div>
               </div>
             </div>
           ) : null}
@@ -739,6 +891,14 @@ function TaskForm({
         open={eventDialogOpen}
         onOpenChange={setEventDialogOpen}
         defaultDate={task?.dueDate ? new Date(task.dueDate) : undefined}
+      />
+
+      {/* ----- Synthèse IA de la description (contenus longs) ----- */}
+      <AiSummaryDialog
+        open={summaryOpen}
+        onOpenChange={setSummaryOpen}
+        content={description}
+        contextLabel="cette description"
       />
 
       {/* ----- Confirmation de suppression (texte différencié actif/archivé) ----- */}

@@ -10,6 +10,7 @@ import { toEmailDto } from "@/lib/dto"
 import { analyzeSchema } from "@/lib/validators"
 import { extractEvent, getLastAiProvider, type ExtractedEvent } from "@/lib/ai-provider"
 import type { EventSuggestion } from "@/lib/types"
+import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 
 export const runtime = "nodejs"
 export const maxDuration = 60
@@ -48,12 +49,22 @@ function suggestionFromExtracted(extracted: ExtractedEvent, now: Date): EventSug
     startTime: new Date(startTimeMs).toISOString(),
     endTime: new Date(endTimeMs).toISOString(),
     confidence,
+    // Enrichi IA locale : lieu + participants détectés (le micro-service ne
+    // renvoie que des adresses réellement citées dans l'email source).
+    ...(extracted.location ? { location: extracted.location.slice(0, 200) } : {}),
+    ...(Array.isArray(extracted.attendees) && extracted.attendees.length
+      ? { attendees: extracted.attendees.slice(0, 10) }
+      : {}),
   }
 }
 
 export async function POST(req: NextRequest) {
   const user = await getSessionUser()
   if (!user) return NextResponse.json({ error: "Non authentifié" }, { status: 401 })
+
+  // Rate limit : 10 analyses d'email par minute et par utilisateur.
+  const rl = rateLimit(`ai:analyze:${user.id}`, 10, 60_000)
+  if (!rl.ok) return tooManyRequests(rl)
 
   const parsed = analyzeSchema.safeParse(await req.json())
   if (!parsed.success) {

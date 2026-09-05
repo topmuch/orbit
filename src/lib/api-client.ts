@@ -20,6 +20,8 @@ import type {
   EmailDto,
   EventSuggestion,
   StatsDto,
+  AIPrioritySuggestion,
+  AISummary,
 } from "@/lib/types";
 
 // ---------- Fetch de base ----------
@@ -545,6 +547,54 @@ export function useAIAnalysis() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["emails"] })
     },
+  })
+}
+
+// ---------- IA locale : suggestion de priorité + synthèse (Prompt IA) ----------
+
+/** Entrée de suggestion de priorité : tâche existante OU tâche en création. */
+export type AIPriorityInput =
+  | { taskId: string }
+  | { title: string; description?: string | null; dueDate?: string | null }
+
+/**
+ * useAIPrioritySuggestion — POST /api/ai/suggest-priority.
+ * Mode { taskId } : suggestion persistée sur la tâche (aiSuggestedPriority).
+ * Mode { title } : suggestion jetable (formulaire de création).
+ */
+export function useAIPrioritySuggestion() {
+  const qc = useQueryClient()
+  return useMutation<{ suggestion: AIPrioritySuggestion }, Error, AIPriorityInput>({
+    mutationFn: (input) =>
+      api<{ suggestion: AIPrioritySuggestion }>("/api/ai/suggest-priority", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (data) => {
+      if (data.suggestion.persisted) {
+        void qc.invalidateQueries({ queryKey: ["tasks"] })
+        void qc.invalidateQueries({ queryKey: ["task-stats"] })
+      }
+    },
+  })
+}
+
+/** Entrée de synthèse : email de la boîte OU texte libre. */
+export type AISummarizeInput =
+  | { emailId: string; style?: "bullet_points" | "paragraph" | "key_points"; maxLength?: number }
+  | { content: string; style?: "bullet_points" | "paragraph" | "key_points"; maxLength?: number }
+
+/**
+ * useAISummary — POST /api/ai/summarize (cache 10 min côté micro-service).
+ * Utilisé par la vue emails (« Résumer ») et les descriptions de tâches longues.
+ */
+export function useAISummary() {
+  return useMutation<{ summary: AISummary; emailId?: string }, Error, AISummarizeInput>({
+    mutationFn: (input) =>
+      api<{ summary: AISummary; emailId?: string }>("/api/ai/summarize", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
   })
 }
 

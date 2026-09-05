@@ -188,6 +188,31 @@ export type EventSuggestion = {
   startTime: string // ISO
   endTime: string // ISO
   confidence: number // 0..1
+  /** Lieu extrait par l'IA — null/absent si non détecté (enrichi IA locale). */
+  location?: string | null
+  /** Participants détectés (emails réellement cités dans l'email source). */
+  attendees?: string[]
+}
+
+/** Suggestion de priorité IA pour une tâche (POST /api/ai/suggest-priority). */
+export type AIPrioritySuggestion = {
+  priority: TaskPriority
+  /** 0..1 */
+  confidence: number
+  /** Justification courte (≤ 200 caractères). */
+  reasoning: string
+  /** true = sauvegardée sur la tâche (édition) ; false = jetable (création). */
+  persisted: boolean
+}
+
+/** Synthèse IA d'un contenu long (POST /api/ai/summarize). */
+export type AISummary = {
+  summary: string
+  /** Nombre de mots du contenu original. */
+  originalLength: number
+  /** Nombre de mots du résumé. */
+  summaryLength: number
+  style: "bullet_points" | "paragraph" | "key_points"
 }
 
 export type EmailDto = {
