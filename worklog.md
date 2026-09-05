@@ -440,3 +440,18 @@ Stage Summary:
 - 3 bugs critiques corrigés par main : Zod description nullable, queryKey useMemo, et surtout le SW qui gelait le bundle dev (cache-first des chunks non hashés) — le SW ne s'enregistre plus en dev (orbit-v2 en prod purge les anciens caches) ; minuteKey+staleTime rendent useEventsRange robuste aux plages new Date()
 - Composants publics : <TaskBoard tasks showArchived eventTitles onEdit onArchiveToggle onDelete onCreate>, <TaskModal open onOpenChange task? defaultStatus?>, <TaskListView ...>, <SubTaskList taskId|null localItems? onLocalChange?>, <TagManager open onOpenChange>, <TaskStats />, <TaskFilters value onChange tags>, <PriorityBadge priority>, <DueDateBadge due completed?> ; hooks api-client : useTasks/useTaskStats/useTags/useTaskMutations{create,update,move,archive,removeHard}/useSubtaskMutations{add,patch,remove}/useTagMutations{create,update,remove}
 - Décisions : suppression définitive via AlertDialog = hard=1 (soft archivage via les actions archive) ; drag tactile mobile garanti par le menu « Déplacer vers » (le drag pointeur reste fonctionnel) ; réordonnancement sous-tâches par boutons ↑↓ (PATCH position=indice) ; Étape/recréation : les tableaux tags/subtasks en PATCH = remplacement complet (sémantique put) — le modal n'envoie jamais subtasks en édition (mutations directes)
+
+---
+Task ID: 13-c
+Agent: main (Z.ai Code)
+Task: QA E2E finale + publication GitHub du système de tâches complet
+
+Work Log:
+- Reprise et complétion de la QA laissée inachevée par l'agent 13-b (limite de contexte) : diagnostic des 2 427 requêtes /api/events (décomposition : test causalité dev.log→HMR réfuté, analyse des plages, débogage par console.log instrumental, découverte du service worker contrôlant la page avec cache-first sur les chunks /_next/ dev)
+- Correctifs : pwa-register (SW désactivé en dev), sw.js orbit-v2, api-client minuteKey + staleTime, validators description nullable, lib/dates formatDueDate completed — détail dans 13-b
+- Vérifications finales : tsc 0 erreur src/, lint 0/0, dev.log propre (plus que des 200 + 2 requêtes events légitimes par navigation), 3 services UP (:3000 / :3031 / :3032), git local == origin/main (fea9a17)
+- Publication : commit feat(tasks) 44 fichiers + push GitHub topmuch/orbit
+
+Stage Summary:
+- Système de gestion de tâches complet livré et vérifié bout-en-bout (backend curl + frontend navigateur) ; le point le plus sensible de la session : la boucle de refetch infinie /api/events était un symptôme de bundle dev gelé par le service worker (cache-first sur chunks non hashés) — résolu à la racine, plus jamais de bundle périmé en dev ; le rate limiting 429 servait de « garde-fou » involontaire qui masquait l'ampleur (2 427 requêtes)
+- Prochaines briques possibles (prompts suivants de l'utilisateur) : Phase 4 IA locale (remplacer les placeholders aiSuggestedPriority via Ollama), prompts 5-8
