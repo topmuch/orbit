@@ -1,9 +1,10 @@
-// GET/POST /api/email/accounts — Comptes email IMAP de l'utilisateur
+// GET/POST /api/email/accounts — Comptes email IMAP + SMTP de l'utilisateur
 // ─────────────────────────────────────────────────────────────────────────────
 // GET  : comptes (DTO SANS mot de passe) + nombre d'emails synchronisés.
 // POST : création — teste d'abord la connexion IMAP (sauf test:false explicite),
-//        puis chiffre le mot de passe (AES-256-GCM) AVANT tout stockage.
-//        409 si l'adresse est déjà configurée pour cet utilisateur.
+//        puis le SMTP si fourni (sauf testSmtp:false), chiffre les mots de
+//        passe (AES-256-GCM) AVANT tout stockage. 409 si l'adresse est déjà
+//        configurée pour cet utilisateur.
 
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
@@ -12,6 +13,7 @@ import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { emailAccountCreateSchema } from "@/lib/validators"
 import { encryptSecret } from "@/lib/secret-box"
 import { testImapConnection } from "@/lib/imap"
+import { testSmtpConnection } from "@/lib/smtp"
 import { toEmailAccountDto } from "@/lib/dto"
 
 export const runtime = "nodejs"
@@ -74,8 +76,27 @@ export async function POST(req: Request) {
     }
   }
 
-  // Chiffrement AVANT stockage — le mot de passe ne transite jamais en clair
-  // vers la base (AES-256-GCM, clé dérivée de AUTH_SECRET).
+  // SMTP fourni ? Test préalable également (identifiants dédiés ou repli IMAP)
+  const smtpHost = input.smtpHost?.trim() || null
+  if (smtpHost && input.testSmtp) {
+    const smtpTest = await testSmtpConnection({
+      host: smtpHost,
+      port: input.smtpPort ?? 587,
+      secure: input.smtpSecure ?? true,
+      username: input.smtpUsername?.trim() || input.username,
+      password: input.smtpPassword || input.password, // repli IMAP si vide
+    })
+    if (!smtpTest.ok) {
+      return NextResponse.json(
+        { error: smtpTest.error ?? "Connexion SMTP impossible" },
+        { status: 400 }
+      )
+    }
+  }
+
+  // Chiffrement AVANT stockage — les mots de passe ne transitent jamais en
+  // clair vers la base (AES-256-GCM, clé dérivée de AUTH_SECRET).
+  const smtpPassword = input.smtpPassword?.trim() || null
   const account = await db.emailAccount.create({
     data: {
       userId: user.id,
@@ -90,6 +111,13 @@ export async function POST(req: Request) {
       syncIntervalMin: input.syncIntervalMin,
       fetchDays: input.fetchDays,
       maxMessages: input.maxMessages,
+      // SMTP : null = envoi non configuré ; mot de passe dédié chiffré sinon
+      // (null = repli sur les identifiants IMAP à l'envoi)
+      smtpHost,
+      smtpPort: smtpHost ? (input.smtpPort ?? 587) : null,
+      smtpSecure: input.smtpSecure ?? true,
+      smtpUsername: input.smtpUsername?.trim() || null,
+      smtpPasswordEnc: smtpPassword ? encryptSecret(smtpPassword) : null,
     },
   })
 

@@ -74,3 +74,6 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# Pièces jointes emails (binaire local, jamais commité)
+storage/

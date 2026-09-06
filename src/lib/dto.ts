@@ -3,7 +3,7 @@
 // Lecture défensive des champs JSON (attendus de la validation Zod, mais
 // potentiellement corrompus/hérités) : toute valeur invalide est ignorée.
 
-import type { Event, Task, EmailLog, EmailAccount, Tag, SubTask } from "@prisma/client"
+import type { Event, Task, EmailLog, EmailAccount, EmailAttachment, Tag, SubTask } from "@prisma/client"
 import type {
   EventDto,
   TaskDto,
@@ -15,6 +15,7 @@ import type {
   EventReminder,
   TaskPriority,
   TaskStatus,
+  EmailFolder,
 } from "@/lib/types"
 import type { Occurrence } from "@/lib/calendar"
 
@@ -166,7 +167,13 @@ export function toTaskDto(t: TaskWithRelations): TaskDto {
   }
 }
 
-export function toEmailDto(e: EmailLog & { account?: { address: string } | null }): EmailDto {
+export function toEmailDto(
+  e: EmailLog & {
+    account?: { address: string; label: string | null } | null
+    attachments?: EmailAttachment[]
+  },
+  opts: { detail?: boolean } = {}
+): EmailDto {
   const raw = e.suggestedEvent as EventSuggestion | null
   let suggested: EventSuggestion | null = null
   if (raw && typeof raw === "object" && raw.title && raw.startTime) {
@@ -178,16 +185,48 @@ export function toEmailDto(e: EmailLog & { account?: { address: string } | null 
       confidence: Number(raw.confidence ?? 0.5),
     }
   }
+  // toAddresses : JSON tableau d'adresses (tolérant aux valeurs legacy/null)
+  let toAddresses: string[] | null = null
+  if (Array.isArray(e.toAddresses)) {
+    toAddresses = (e.toAddresses as unknown[]).filter(
+      (v): v is string => typeof v === "string" && v.length > 0
+    )
+  }
+  const folder: EmailFolder =
+    e.folder === "SENT" || e.folder === "ARCHIVE" || e.folder === "TRASH" ? e.folder : "INBOX"
+
   return {
     id: e.id,
     messageId: e.messageId,
     fromAddress: e.fromAddress,
     fromName: e.fromName,
+    toAddresses,
     subject: e.subject,
+    snippet: e.snippet,
     bodyText: e.bodyText,
+    // HTML + pièces jointes : UNIQUEMENT sur la route détail (payload liste léger)
+    ...(opts.detail
+      ? {
+          bodyHtml: e.bodyHtml,
+          attachments: (e.attachments ?? []).map((a) => ({
+            id: a.id,
+            filename: a.filename,
+            contentType: a.contentType,
+            size: a.size,
+            contentId: a.contentId,
+            isInline: a.isInline,
+          })),
+          accountLabel: e.account?.label ?? null,
+        }
+      : {}),
     receivedAt: e.receivedAt.toISOString(),
+    sentAt: e.sentAt?.toISOString() ?? null,
     isRead: e.isRead,
+    isStarred: e.isStarred,
     isProcessed: e.isProcessed,
+    folder,
+    threadId: e.threadId,
+    hasAttachments: e.hasAttachments,
     suggestedEvent: suggested,
     accountAddress: e.account?.address ?? null,
   }
@@ -198,7 +237,7 @@ export function toEmailDto(e: EmailLog & { account?: { address: string } | null 
 /** Compte Prisma avec compteur d'emails chargé (count via groupBy). */
 export type EmailAccountWithCount = EmailAccount & { emailCount?: number }
 
-/** Sérialisation SANS SECRETS — passwordEnc n'existe pas dans le DTO. */
+/** Sérialisation SANS SECRETS — passwordEnc/smtpPasswordEnc absents du DTO. */
 export function toEmailAccountDto(a: EmailAccountWithCount): EmailAccountDto {
   return {
     id: a.id,
@@ -219,6 +258,12 @@ export function toEmailAccountDto(a: EmailAccountWithCount): EmailAccountDto {
     lastSyncCount: a.lastSyncCount,
     emailCount: a.emailCount ?? 0,
     createdAt: a.createdAt.toISOString(),
+    smtpHost: a.smtpHost,
+    smtpPort: a.smtpPort,
+    smtpSecure: a.smtpSecure,
+    smtpUsername: a.smtpUsername,
+    hasSmtpPassword: Boolean(a.smtpPasswordEnc),
+    canSend: Boolean(a.smtpHost),
   }
 }
 

@@ -85,7 +85,7 @@ export async function GET(req: NextRequest) {
     nextEvent,
     todayEvents,
     priorityTasks: priorityTasks.map(taskDto),
-    recentEmails: emails.map(toEmailDto),
+    recentEmails: emails.map((e) => toEmailDto(e)),
     weekLoad,
   }
 

@@ -21,6 +21,10 @@ import type {
   EmailAccountDto,
   EmailAccountTestResult,
   EmailSyncResult,
+  EmailsPageDto,
+  EmailListFilters,
+  ComposeEmailInput,
+  SmtpTestResult,
   EventSuggestion,
   StatsDto,
   AIPrioritySuggestion,
@@ -50,6 +54,7 @@ const OFFLINE_QUEUE_EXCLUDED = [
   "/api/subscribe",
   "/api/email/",
   "/api/emails/sync",
+  "/api/emails/send", // envoi SMTP : réseau requis, JAMAIS différé silencieusement
   "/api/events/import",
   "/api/events/export",
   "/api/export",
@@ -561,25 +566,84 @@ export function useTagMutations() {
 
 // ---------- Emails ----------
 
-export function useEmails() {
-  return useQuery<{ emails: EmailDto[] }>({
-    queryKey: ["emails"],
-    queryFn: () => api<{ emails: EmailDto[] }>("/api/emails"),
+/** Construit l'URL de liste (query string stable pour React Query). */
+function emailListUrl(filters: EmailListFilters): string {
+  const sp = new URLSearchParams()
+  sp.set("folder", filters.folder)
+  if (filters.q?.trim()) sp.set("q", filters.q.trim())
+  if (filters.accountId) sp.set("accountId", filters.accountId)
+  if (filters.unread) sp.set("unread", "true")
+  if (filters.starred) sp.set("starred", "true")
+  if (filters.page && filters.page > 1) sp.set("page", String(filters.page))
+  if (filters.limit) sp.set("limit", String(filters.limit))
+  if (filters.sort === "oldest") sp.set("sort", "oldest")
+  const qs = sp.toString()
+  return qs ? `/api/emails?${qs}` : "/api/emails"
+}
+
+/**
+ * Liste des emails (filtres dossiers/recherche/compte + compteurs + comptes).
+ * SANS argument : vue globale (badge de navigation, centre de notifications).
+ * Rafraîchissement 60 s ≈ quasi temps réel (sync serveur toutes les 60 s).
+ */
+export function useEmails(filters?: EmailListFilters) {
+  const effective = filters ?? { folder: "ALL" as const }
+  return useQuery<EmailsPageDto>({
+    queryKey: ["emails", JSON.stringify(effective)],
+    queryFn: () => api<EmailsPageDto>(emailListUrl(effective)),
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev, // pagination sans flash
   })
 }
+
+/** Détail complet d'un email (HTML nettoyé + pièces jointes + compte). */
+export function useEmailDetail(id: string | null) {
+  return useQuery<{ email: EmailDto }>({
+    queryKey: ["email-detail", id],
+    queryFn: () => api<{ email: EmailDto }>(`/api/emails/${id}`),
+    enabled: Boolean(id),
+    staleTime: 30_000,
+  })
+}
+
+/** PATCH unitaire (lu / étoilé / dossier / traité). */
+export type EmailPatchInput = {
+  id: string
+  isRead?: boolean
+  isProcessed?: boolean
+  isStarred?: boolean
+  folder?: "INBOX" | "SENT" | "ARCHIVE" | "TRASH"
+}
+
+export type EmailBulkAction =
+  | "read"
+  | "unread"
+  | "star"
+  | "unstar"
+  | "archive"
+  | "trash"
+  | "restore"
+  | "delete"
 
 export function useEmailMutations() {
   const qc = useQueryClient()
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["emails"] })
+    qc.invalidateQueries({ queryKey: ["email-detail"] })
     qc.invalidateQueries({ queryKey: ["stats"] })
+    qc.invalidateQueries({ queryKey: ["email-accounts"] })
   }
 
   const patch = useMutation({
-    mutationFn: (vars: { id: string; isRead?: boolean; isProcessed?: boolean }) =>
+    mutationFn: (vars: EmailPatchInput) =>
       api<{ email: EmailDto }>(`/api/emails/${vars.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ isRead: vars.isRead, isProcessed: vars.isProcessed }),
+        body: JSON.stringify({
+          isRead: vars.isRead,
+          isProcessed: vars.isProcessed,
+          isStarred: vars.isStarred,
+          folder: vars.folder,
+        }),
       }),
     onSuccess: invalidate,
   })
@@ -599,13 +663,29 @@ export function useEmailMutations() {
       }),
     onSuccess: invalidate,
   })
+  const bulk = useMutation({
+    mutationFn: (vars: { ids: string[]; action: EmailBulkAction }) =>
+      api<{ updated: number }>("/api/emails/bulk", {
+        method: "PATCH",
+        body: JSON.stringify(vars),
+      }),
+    onSuccess: invalidate,
+  })
+  const send = useMutation({
+    mutationFn: (input: ComposeEmailInput) =>
+      api<{ ok: boolean; messageId: string; rejected: string[] }>("/api/emails/send", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: invalidate,
+  })
 
-  return { patch, remove, sync, analyze }
+  return { patch, remove, sync, analyze, bulk, send }
 }
 
-// ---------- Comptes email IMAP (Task 6) ----------
+// ---------- Comptes email IMAP + SMTP ----------
 
-/** Comptes IMAP de l'utilisateur (JAMAIS de mot de passe dans les DTO). */
+/** Comptes de l'utilisateur (JAMAIS de mot de passe dans les DTO). */
 export function useEmailAccounts() {
   return useQuery<{ accounts: EmailAccountDto[] }>({
     queryKey: ["email-accounts"],
@@ -628,6 +708,12 @@ export type EmailAccountInput = {
   syncIntervalMin: number
   fetchDays: number
   maxMessages: number
+  // ── SMTP (envoi — optionnel) ──
+  smtpHost?: string
+  smtpPort?: number
+  smtpSecure?: boolean
+  smtpUsername?: string
+  smtpPassword?: string
 }
 
 export function useEmailAccountMutations() {
@@ -638,10 +724,25 @@ export function useEmailAccountMutations() {
     qc.invalidateQueries({ queryKey: ["stats"] })
   }
 
-  /** Tester une connexion SANS rien enregistrer. */
+  /** Tester une connexion IMAP SANS rien enregistrer. */
   const test = useMutation({
     mutationFn: (input: Pick<EmailAccountInput, "imapHost" | "imapPort" | "imapSecure" | "username" | "password" | "allowSelfSigned">) =>
       api<EmailAccountTestResult>("/api/email/accounts/test", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+  })
+
+  /** Tester une connexion SMTP SANS rien enregistrer. */
+  const testSmtp = useMutation({
+    mutationFn: (input: {
+      smtpHost: string
+      smtpPort: number
+      smtpSecure: boolean
+      username: string
+      password: string
+    }) =>
+      api<SmtpTestResult>("/api/email/accounts/test-smtp", {
         method: "POST",
         body: JSON.stringify(input),
       }),
@@ -651,7 +752,8 @@ export function useEmailAccountMutations() {
     mutationFn: (input: EmailAccountInput) =>
       api<{ account: EmailAccountDto }>("/api/email/accounts", {
         method: "POST",
-        body: JSON.stringify({ ...input, test: true }),
+        // test:true → IMAP vérifié AVANT stockage ; testSmtp → SMTP idem si fourni
+        body: JSON.stringify({ ...input, test: true, testSmtp: true }),
       }),
     onSuccess: invalidate,
   })
@@ -660,13 +762,36 @@ export function useEmailAccountMutations() {
   const update = useMutation({
     mutationFn: (vars: {
       id: string
-      input: Partial<Omit<EmailAccountInput, "password">> & { password?: string; isActive?: boolean; label?: string | null }
-    }) =>
-      api<{ account: EmailAccountDto }>(`/api/email/accounts/${vars.id}`, {
+      input: Partial<Omit<EmailAccountInput, "password">> & {
+        password?: string
+        isActive?: boolean
+        label?: string | null
+        // null = désactiver l'envoi SMTP du compte
+        smtpHost?: string | null
+        smtpPassword?: string
+      }
+    }) => {
+      const imapChanged =
+        vars.input.password !== undefined ||
+        vars.input.imapHost !== undefined ||
+        vars.input.imapPort !== undefined ||
+        vars.input.imapSecure !== undefined ||
+        vars.input.username !== undefined
+      const smtpChanged =
+        vars.input.smtpHost !== undefined ||
+        vars.input.smtpPort !== undefined ||
+        vars.input.smtpSecure !== undefined ||
+        vars.input.smtpUsername !== undefined ||
+        vars.input.smtpPassword !== undefined
+      return api<{ account: EmailAccountDto }>(`/api/email/accounts/${vars.id}`, {
         method: "PATCH",
-        // test:true → vérifie la connexion si hôte/port/identifiant/mot de passe changent
-        body: JSON.stringify({ ...vars.input, test: vars.input.password !== undefined || vars.input.imapHost !== undefined }),
-      }),
+        body: JSON.stringify({
+          ...vars.input,
+          test: imapChanged,
+          testSmtp: smtpChanged,
+        }),
+      })
+    },
     onSuccess: invalidate,
   })
 
@@ -684,7 +809,7 @@ export function useEmailAccountMutations() {
     onSuccess: invalidate,
   })
 
-  return { test, create, update, remove, syncOne }
+  return { test, testSmtp, create, update, remove, syncOne }
 }
 
 // ---------- Notifications planifiées (alertes personnalisées programmées) ----------

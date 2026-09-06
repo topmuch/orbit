@@ -214,9 +214,44 @@ export const tagUpdateSchema = z.object({
   color: hexColor.optional(),
 })
 
+export const EMAIL_FOLDERS = ["INBOX", "SENT", "ARCHIVE", "TRASH"] as const
+export type EmailFolder = (typeof EMAIL_FOLDERS)[number]
+
 export const emailPatchSchema = z.object({
   isRead: z.boolean().optional(),
   isProcessed: z.boolean().optional(),
+  isStarred: z.boolean().optional(),
+  folder: z.enum(EMAIL_FOLDERS, { message: "Dossier invalide (INBOX | SENT | ARCHIVE | TRASH)" }).optional(),
+})
+
+/** Actions groupées sur une sélection d'emails (≤ 100). */
+export const emailBulkActionSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, "Sélection vide").max(100, "100 emails max par action groupée"),
+  action: z.enum([
+    "read",
+    "unread",
+    "star",
+    "unstar",
+    "archive",
+    "trash",
+    "restore",
+    "delete",
+  ]),
+})
+
+/** Envoi d'un email depuis un compte configuré (POST /api/emails/send). */
+export const sendEmailSchema = z.object({
+  accountId: z.string().min(1),
+  to: z
+    .array(z.string().trim().toLowerCase().email("Destinataire invalide"))
+    .min(1, "Au moins un destinataire")
+    .max(20, "20 destinataires max (To)"),
+  cc: z.array(z.string().trim().toLowerCase().email("Copie invalide")).max(10).optional(),
+  bcc: z.array(z.string().trim().toLowerCase().email("Copie cachée invalide")).max(10).optional(),
+  subject: z.string().trim().min(1, "L'objet est requis").max(255, "Objet trop long (255 max)"),
+  bodyText: z.string().min(1, "Le corps est requis").max(100_000, "Corps trop long (100 000 car. max)"),
+  /** Email auquel on répond (pré-remplit In-Reply-To/References — fil). */
+  replyToEmailId: z.string().min(1).optional(),
 })
 
 // ── Comptes email IMAP ───────────────────────────────────────────────────
@@ -235,6 +270,15 @@ export const emailAccountCreateSchema = z.object({
   maxMessages: z.number().int().min(1).max(500).default(100),
   // Tester la connexion AVANT tout enregistrement (recommandé : toujours vrai)
   test: z.boolean().default(true),
+  // ── SMTP (envoi — optionnel) ──
+  smtpHost: z.string().trim().min(3).max(200).optional().or(z.literal("")),
+  smtpPort: z.number().int().min(1).max(65535).optional(),
+  smtpSecure: z.boolean().optional(),
+  smtpUsername: z.string().trim().max(200).optional().or(z.literal("")),
+  /** null/vide = identifiants IMAP réutilisés (Gmail/Outlook) */
+  smtpPassword: z.string().max(500).optional().or(z.literal("")),
+  /** Tester AUSSI le SMTP fourni (défaut : oui si smtpHost présent) */
+  testSmtp: z.boolean().default(true),
 })
 
 export const emailAccountPatchSchema = z.object({
@@ -251,6 +295,14 @@ export const emailAccountPatchSchema = z.object({
   isActive: z.boolean().optional(),
   // Modifier l'hôte/port/identifiant déclenche un test de connexion préalable
   test: z.boolean().default(false),
+  // ── SMTP (envoi — optionnel ; smtpHost null = désactiver l'envoi) ──
+  smtpHost: z.string().trim().min(3).max(200).nullable().optional(),
+  smtpPort: z.number().int().min(1).max(65535).nullable().optional(),
+  smtpSecure: z.boolean().optional(),
+  smtpUsername: z.string().trim().max(200).nullable().optional(),
+  /** mot de passe vide/undefined = inchangé */
+  smtpPassword: z.string().max(500).optional(),
+  testSmtp: z.boolean().default(false),
 })
 
 export const emailAccountTestSchema = z.object({
@@ -260,6 +312,15 @@ export const emailAccountTestSchema = z.object({
   username: z.string().trim().min(1).max(200),
   password: z.string().min(1).max(500),
   allowSelfSigned: z.boolean().default(false),
+})
+
+/** Test d'une connexion SMTP SANS rien stocker (route /api/email/accounts/test-smtp). */
+export const smtpTestSchema = z.object({
+  smtpHost: z.string().trim().min(3, "Serveur SMTP requis").max(200),
+  smtpPort: z.number().int().min(1).max(65535).default(587),
+  smtpSecure: z.boolean().default(false),
+  username: z.string().trim().min(1).max(200),
+  password: z.string().min(1).max(500),
 })
 
 export const pushSubscribeSchema = z.object({

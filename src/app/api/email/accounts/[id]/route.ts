@@ -1,9 +1,11 @@
-// PATCH/DELETE /api/email/accounts/[id] — Modifier / supprimer un compte IMAP
+// PATCH/DELETE /api/email/accounts/[id] — Modifier / supprimer un compte IMAP+SMTP
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH   : réglages (label, intervalle, fenêtre, actif…) ; si l'hôte, le port,
 //          l'identifiant OU le mot de passe change → test de connexion préalable
 //          (test:true demandé par l'UI) puis re-chiffrement du mot de passe.
-//          LE MOT DE PASSE N'EST JAMAIS RENVOYÉ (le champ reste vide = inchangé).
+//          SMTP : smtpHost null = désactiver l'envoi ; mot de passe SMTP vide =
+//          inchangé (ou repli IMAP) ; testSmtp:true → vérification à l'enregistrement.
+//          LE MOT DE PASSE N'EST JAMAIS RENVOYÉ (champ vide = inchangé).
 // DELETE  : supprime le compte. Les emails DÉJÀ synchronisés restent
 //          consultables (relation SetNull) — seul le lien disparaît.
 
@@ -14,6 +16,7 @@ import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { emailAccountPatchSchema } from "@/lib/validators"
 import { encryptSecret, decryptSecret } from "@/lib/secret-box"
 import { testImapConnection } from "@/lib/imap"
+import { testSmtpConnection } from "@/lib/smtp"
 import { toEmailAccountDto } from "@/lib/dto"
 
 export const runtime = "nodejs"
@@ -87,6 +90,58 @@ export async function PATCH(req: Request, ctx: Ctx) {
   }
   // Re-chiffrement du mot de passe si fourni
   if (input.password !== undefined) data.passwordEnc = encryptSecret(input.password)
+
+  // ── SMTP : configuration effective après fusion (entrée ⊕ état actuel) ──
+  const effectiveSmtpHost =
+    input.smtpHost === undefined ? account.smtpHost : input.smtpHost?.trim() || null
+  const effectiveSmtpPort = input.smtpPort ?? account.smtpPort ?? 587
+  const effectiveSmtpSecure = input.smtpSecure ?? account.smtpSecure
+  const effectiveSmtpUsername =
+    input.smtpUsername === undefined
+      ? account.smtpUsername
+      : input.smtpUsername?.trim() || null
+  // Mot de passe SMTP effectif : saisi > SMTP stocké (déchiffré) > IMAP (repli)
+  let effectiveSmtpPassword: string | null = null
+  if (input.smtpPassword !== undefined && input.smtpPassword !== "") {
+    effectiveSmtpPassword = input.smtpPassword
+  } else if (account.smtpPasswordEnc) {
+    effectiveSmtpPassword = decryptSecret(account.smtpPasswordEnc)
+  }
+
+  // Test SMTP si demandé ET configuration SMTP présente ET modifiée
+  const smtpChanged =
+    input.smtpHost !== undefined ||
+    input.smtpPort !== undefined ||
+    input.smtpSecure !== undefined ||
+    input.smtpUsername !== undefined ||
+    (input.smtpPassword !== undefined && input.smtpPassword !== "")
+  if (effectiveSmtpHost && input.testSmtp && smtpChanged) {
+    const smtpTest = await testSmtpConnection({
+      host: effectiveSmtpHost,
+      port: effectiveSmtpPort,
+      secure: effectiveSmtpSecure,
+      username: effectiveSmtpUsername ?? account.username,
+      password: effectiveSmtpPassword ?? decryptSecret(account.passwordEnc),
+    })
+    if (!smtpTest.ok) {
+      return NextResponse.json(
+        { error: smtpTest.error ?? "Connexion SMTP impossible" },
+        { status: 400 }
+      )
+    }
+  }
+
+  data.smtpHost = effectiveSmtpHost
+  data.smtpPort = effectiveSmtpHost ? effectiveSmtpPort : null
+  data.smtpSecure = effectiveSmtpSecure
+  data.smtpUsername = effectiveSmtpUsername
+  // Mot de passe SMTP : saisi → chiffré · null explicite → repli IMAP ·
+  // absent → conserver le stock actuel
+  if (input.smtpPassword !== undefined && input.smtpPassword !== "") {
+    data.smtpPasswordEnc = encryptSecret(input.smtpPassword)
+  } else if (input.smtpHost === null) {
+    data.smtpPasswordEnc = null // envoi désactivé → secret inutile
+  }
 
   const updated = await db.emailAccount.update({
     where: { id: account.id },

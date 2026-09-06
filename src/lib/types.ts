@@ -215,24 +215,98 @@ export type AISummary = {
   style: "bullet_points" | "paragraph" | "key_points"
 }
 
+export type EmailAttachmentDto = {
+  id: string
+  filename: string
+  contentType: string
+  /** Taille en octets */
+  size: number
+  /** Content-ID MIME (images inline du corps) */
+  contentId: string | null
+  /** true = image intégrée au corps, false = pièce jointe classique */
+  isInline: boolean
+}
+
+/** Dossiers virtuels de la boîte Orbit. */
+export type EmailFolder = "INBOX" | "SENT" | "ARCHIVE" | "TRASH"
+
 export type EmailDto = {
   id: string
   messageId: string
   fromAddress: string
   fromName: string | null
+  /** Destinataires « To » (null = inconnu/démo) */
+  toAddresses: string[] | null
   subject: string
+  /** Aperçu de liste (≤ 200 car.) — null = extrait du corps à l'affichage */
+  snippet: string | null
   bodyText: string
+  /** HTML nettoyé (rendu iframe sandbox) — uniquement sur la route détail */
+  bodyHtml?: string | null
   receivedAt: string // ISO
+  sentAt: string | null // ISO (emails envoyés depuis Orbit)
   isRead: boolean
+  isStarred: boolean
   isProcessed: boolean
+  folder: EmailFolder
+  /** Message-ID parent — regroupement de conversation */
+  threadId: string | null
+  hasAttachments: boolean
+  /** Uniquement sur la route détail */
+  attachments?: EmailAttachmentDto[]
   suggestedEvent: EventSuggestion | null
   /** Adresse du compte IMAP d'origine (null = démo / synthétique) */
   accountAddress: string | null
+  /** Libellé du compte d'origine (route détail) */
+  accountLabel?: string | null
+}
+
+/** Compteurs par dossier (sidebar + badges). */
+export type EmailFolderCounts = {
+  inbox: number
+  inboxUnread: number
+  starred: number
+  sent: number
+  archive: number
+  trash: number
+  unread: number
+  /** Total tous dossiers */
+  all: number
+}
+
+/** Réponse GET /api/emails (liste filtrée + compteurs + comptes). */
+export type EmailsPageDto = {
+  emails: EmailDto[]
+  total: number
+  page: number
+  limit: number
+  counts: EmailFolderCounts
+  accounts: Array<{
+    id: string
+    address: string
+    label: string | null
+    unread: number
+    /** SMTP configuré (envoi possible depuis ce compte) */
+    canSend: boolean
+  }>
+}
+
+/** Filtres de liste côté client (query de useEmails).
+ *  folder "ALL" = vue globale sans filtre de dossier (badges, notifications). */
+export type EmailListFilters = {
+  folder: "INBOX" | "SENT" | "ARCHIVE" | "TRASH" | "STARRED" | "ALL"
+  q?: string
+  accountId?: string
+  unread?: boolean
+  starred?: boolean
+  page?: number
+  limit?: number
+  sort?: "recent" | "oldest"
 }
 
 // ── Comptes email IMAP ─────────────────────────────────────────────────────
 
-/** Compte email IMAP — LE MOT DE PASSE N'EST JAMAIS EXPOSÉ (chiffré en base). */
+/** Compte email IMAP/SMTP — LE MOT DE PASSE N'EST JAMAIS EXPOSÉ (chiffré en base). */
 export type EmailAccountDto = {
   id: string
   label: string | null
@@ -252,6 +326,17 @@ export type EmailAccountDto = {
   lastSyncCount: number | null
   emailCount: number
   createdAt: string
+  // ── SMTP (envoi) ──
+  /** null = envoi non configuré */
+  smtpHost: string | null
+  smtpPort: number | null
+  smtpSecure: boolean
+  /** null = identifiant IMAP réutilisé */
+  smtpUsername: string | null
+  /** true = mot de passe SMTP dédié présent (sinon IMAP réutilisé) */
+  hasSmtpPassword: boolean
+  /** true = envoi possible (hôte SMTP défini) */
+  canSend: boolean
 }
 
 /** Résultat d'un test de connexion IMAP (aucun secret). */
@@ -260,6 +345,23 @@ export type EmailAccountTestResult = {
   mailboxes: string[]
   messageCount: number | null
   error?: string
+}
+
+/** Résultat d'un test SMTP (aucun secret). */
+export type SmtpTestResult = {
+  ok: boolean
+  error?: string
+}
+
+/** Entrée de composition (dialog « Écrire »). */
+export type ComposeEmailInput = {
+  accountId: string
+  to: string[]
+  cc?: string[]
+  bcc?: string[]
+  subject: string
+  bodyText: string
+  replyToEmailId?: string
 }
 
 /** Résultat d'une synchronisation de comptes (aucun contenu d'email). */

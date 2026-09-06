@@ -60,6 +60,70 @@ Tél. : +33 1 23 45 67 89`,
   "utf8"
 ).toString("base64")
 
+// ── Message 4 (QA Task emails-complets) : multipart HTML + PJ + image inline ─
+// HTML volontairement « sale » : <script>, onclick, <style>, href javascript:,
+// img cid inline — la sanitization serveur doit tout retirer sauf la mise en
+// forme et l'image inline (réécrite en /api/emails/attachments/[id]?inline=1).
+const dirtyHtml = Buffer.from(
+  `<!DOCTYPE html><html><head><style>body{background:pink}</style></head>
+<body bgcolor="#ffffff">
+<h2>Rapport hebdomadaire — <strong>semaine 37</strong></h2>
+<script>alert('XSS-NE-DOIT-PAS-APPARAÎTRE')</script>
+<p onclick="voler()">Bonjour, voici le <em>rapport</em> de la semaine :</p>
+<table border="1"><tr><th>Projet</th><th>Avancement</th></tr>
+<tr><td>Orbit</td><td>78 %</td></tr></table>
+<p><a href="javascript:alert(1)">lien piégé</a> · <a href="https://orbit.example/rapport">lien légitime</a></p>
+<p>Logo : <img src="cid:logo9f3" alt="logo Orbit" width="48"></p>
+</body></html>`,
+  "utf8"
+).toString("base64")
+
+/** PNG 1×1 (base64) — image inline du message 4. */
+const tinyPng =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+/** Faux PDF (base64) — pièce jointe classique du message 4. */
+const tinyPdf = Buffer.from(
+  "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF",
+  "utf8"
+).toString("base64")
+
+function multipartMessage(uid: number, date: Date, fromLine: string, subjectLine: string): MockMessage {
+  const mime =
+    `From: ${fromLine}\r\n` +
+    `To: ${QA_USER}\r\n` +
+    `Subject: ${subjectLine}\r\n` +
+    `Date: ${rfc2822(date)}\r\n` +
+    `Message-ID: <mock-${uid}-${date.getTime()}@orbit-qa.local>\r\n` +
+    `MIME-Version: 1.0\r\n` +
+    `Content-Type: multipart/mixed; boundary="BOUND1"\r\n` +
+    `\r\n` +
+    `--BOUND1\r\n` +
+    `Content-Type: multipart/related; boundary="BOUND2"\r\n` +
+    `\r\n` +
+    `--BOUND2\r\n` +
+    `Content-Type: text/html; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: base64\r\n` +
+    `\r\n` +
+    `${dirtyHtml}\r\n` +
+    `--BOUND2\r\n` +
+    `Content-Type: image/png; name="logo.png"\r\n` +
+    `Content-Transfer-Encoding: base64\r\n` +
+    `Content-ID: <logo9f3>\r\n` +
+    `Content-Disposition: inline; filename="logo.png"\r\n` +
+    `\r\n` +
+    `${tinyPng}\r\n` +
+    `--BOUND2--\r\n` +
+    `--BOUND1\r\n` +
+    `Content-Type: application/pdf; name="facture-octobre.pdf"\r\n` +
+    `Content-Transfer-Encoding: base64\r\n` +
+    `Content-Disposition: attachment; filename="facture-octobre.pdf"\r\n` +
+    `\r\n` +
+    `${tinyPdf}\r\n` +
+    `--BOUND1--\r\n`
+  return { uid, internalDate: date, flags: [], raw: Buffer.from(mime, "utf8") }
+}
+
 interface MockMessage {
   uid: number
   internalDate: Date
@@ -67,7 +131,14 @@ interface MockMessage {
   raw: Buffer
 }
 
-function message(uid: number, date: Date, headers: string, body: string, bodyEncoding?: string): MockMessage {
+function message(
+  uid: number,
+  date: Date,
+  headers: string,
+  body: string,
+  bodyEncoding?: string,
+  flags: string[] = []
+): MockMessage {
   const mime =
     `From: ${headers.split("\n")[0]}\r\n` +
     `To: ${QA_USER}\r\n` +
@@ -79,7 +150,7 @@ function message(uid: number, date: Date, headers: string, body: string, bodyEnc
     (bodyEncoding ? `Content-Transfer-Encoding: ${bodyEncoding}\r\n` : "") +
     `\r\n` +
     body
-  return { uid, internalDate: date, flags: uid === 3 ? ["\\Seen"] : [], raw: Buffer.from(mime, "utf8") }
+  return { uid, internalDate: date, flags: flags.length ? flags : uid === 3 ? ["\\Seen"] : [], raw: Buffer.from(mime, "utf8") }
 }
 
 const MESSAGES: MockMessage[] = [
@@ -101,7 +172,8 @@ Cabinet Dentaire Voltaire`
     hoursAgo(26),
     `=?UTF-8?B?w4lsb2RpZSBNYXJ0aW4=?= <elodie.martin@orbit-qa.local>\n=?UTF-8?B?UsOpdW5pb24gw6lxdWlwZSBwcm9kdWl0?=`,
     utf8Body,
-    "base64"
+    "base64",
+    ["\\Flagged"] // QA : étoile IMAP initiale
   ),
   message(
     3,
@@ -113,6 +185,13 @@ Votre facture du mois de septembre est disponible dans votre espace client.
 Montant : 46,90 euros. Prelevement le 15 du mois.
 
 Service Facturation Orange`
+  ),
+  // QA Task emails-complets : HTML sale + image inline cid + PDF joint
+  multipartMessage(
+    4,
+    hoursAgo(2),
+    `"Reporting Orbit" <reporting@orbit-qa.local>`,
+    "Rapport hebdomadaire et facture (HTML + pieces jointes)"
   ),
 ]
 
@@ -256,6 +335,34 @@ function handleLine(session: Session, line: string) {
         }
         write(`* SEARCH ${ids.join(" ")}`.trimEnd())
         write(`${tag} OK SEARCH completed`)
+        break
+      }
+
+      if (sub === "STORE") {
+        // UID STORE <ids> (+|-)FLAGS (\Seen | \Flagged) — drapeaux serveur
+        const storeMatch = remainder.match(/^(\d+(?:[,\d])*)\s+([+\-])FLAGS\s*\(?([^)]*)\)?/i)
+        if (storeMatch) {
+          const ids = storeMatch[1].split(",").map(Number)
+          const op = storeMatch[2]
+          const flagNames = storeMatch[3].trim().split(/\s+/).filter(Boolean)
+          for (const id of ids) {
+            const msg = MESSAGES.find((m) => m.uid === id)
+            if (!msg) continue
+            for (const f of flagNames) {
+              const clean = f.replace(/[()]/g, "")
+              if (op === "+") {
+                if (!msg.flags.includes(clean)) msg.flags.push(clean)
+              } else {
+                msg.flags = msg.flags.filter((x) => x !== clean)
+              }
+            }
+            const seq = MESSAGES.indexOf(msg) + 1
+            write(`* ${seq} FETCH (UID ${msg.uid} FLAGS (${msg.flags.join(" ")}))`)
+          }
+          write(`${tag} OK STORE completed`)
+        } else {
+          write(`${tag} BAD STORE syntax`)
+        }
         break
       }
 

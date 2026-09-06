@@ -63,6 +63,7 @@ import {
   AlertTriangle,
   Clock,
   Server,
+  Send,
 } from "lucide-react"
 
 /** Serveurs IMAP courants (pré-remplissage — jamais de mot de passe). */
@@ -73,6 +74,15 @@ const IMAP_PRESETS: Array<{ label: string; host: string; note?: string }> = [
   { label: "Yahoo", host: "imap.mail.yahoo.com" },
   { label: "Free", host: "imap.free.fr" },
   { label: "Orange", host: "imap.orange.fr" },
+]
+
+/** Serveurs SMTP courants (envoi). */
+const SMTP_PRESETS: Array<{ label: string; host: string; port: string; secure: boolean }> = [
+  { label: "Gmail", host: "smtp.gmail.com", port: "465", secure: true },
+  { label: "Outlook", host: "smtp.office365.com", port: "587", secure: false },
+  { label: "iCloud", host: "smtp.mail.me.com", port: "465", secure: true },
+  { label: "Yahoo", host: "smtp.mail.yahoo.com", port: "465", secure: true },
+  { label: "Free", host: "smtp.free.fr", port: "465", secure: true },
 ]
 
 type FormState = {
@@ -86,6 +96,13 @@ type FormState = {
   allowSelfSigned: boolean
   syncIntervalMin: string
   fetchDays: string
+  // ── SMTP (envoi — optionnel) ──
+  smtpEnabled: boolean
+  smtpHost: string
+  smtpPort: string
+  smtpSecure: boolean
+  smtpUsername: string
+  smtpPassword: string
 }
 
 const EMPTY_FORM: FormState = {
@@ -99,11 +116,17 @@ const EMPTY_FORM: FormState = {
   allowSelfSigned: false,
   syncIntervalMin: "15",
   fetchDays: "30",
+  smtpEnabled: false,
+  smtpHost: "",
+  smtpPort: "587",
+  smtpSecure: false,
+  smtpUsername: "",
+  smtpPassword: "",
 }
 
 export function EmailAccountsCard() {
   const { data, isLoading } = useEmailAccounts()
-  const { test, create, update, remove, syncOne } = useEmailAccountMutations()
+  const { test, testSmtp, create, update, remove, syncOne } = useEmailAccountMutations()
   const accounts = data?.accounts ?? []
 
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -111,11 +134,13 @@ export function EmailAccountsCard() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const [confirmDelete, setConfirmDelete] = useState<EmailAccountDto | null>(null)
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
+  const [smtpTestResult, setSmtpTestResult] = useState<{ ok: boolean; message: string } | null>(null)
 
   function openCreate() {
     setEditing(null)
     setForm(EMPTY_FORM)
     setTestResult(null)
+    setSmtpTestResult(null)
     setDialogOpen(true)
   }
 
@@ -132,8 +157,15 @@ export function EmailAccountsCard() {
       allowSelfSigned: account.allowSelfSigned,
       syncIntervalMin: String(account.syncIntervalMin),
       fetchDays: String(account.fetchDays),
+      smtpEnabled: Boolean(account.smtpHost),
+      smtpHost: account.smtpHost ?? "",
+      smtpPort: String(account.smtpPort ?? 587),
+      smtpSecure: account.smtpPort === 465 ? true : account.smtpSecure,
+      smtpUsername: account.smtpUsername ?? "",
+      smtpPassword: "", // vide = inchangé (ou repli IMAP)
     })
     setTestResult(null)
+    setSmtpTestResult(null)
     setDialogOpen(true)
   }
 
@@ -171,9 +203,53 @@ export function EmailAccountsCard() {
     }
   }
 
+  /** Test SMTP : identifiants dédiés ou repli IMAP (même compte souvent). */
+  async function handleTestSmtp() {
+    if (!form.smtpHost.trim()) {
+      toast.error("Activez l'envoi SMTP et renseignez le serveur.")
+      return
+    }
+    const username = form.smtpUsername.trim() || form.username.trim()
+    const password = form.smtpPassword || form.password
+    if (!username || !password) {
+      toast.error(
+        "Renseignez un mot de passe (SMTP ou IMAP) pour tester — en édition, saisissez-en un nouveau si l'ancien n'est pas réutilisable."
+      )
+      return
+    }
+    try {
+      const res = await testSmtp.mutateAsync({
+        smtpHost: form.smtpHost.trim(),
+        smtpPort: Number(form.smtpPort) || 587,
+        smtpSecure: form.smtpSecure,
+        username,
+        password,
+      })
+      setSmtpTestResult({
+        ok: res.ok,
+        message: res.ok ? "Connexion SMTP réussie — l'envoi est prêt." : (res.error ?? "Connexion SMTP impossible"),
+      })
+      if (res.ok) toast.success("Connexion SMTP réussie")
+    } catch (err) {
+      setSmtpTestResult({ ok: false, message: (err as Error).message })
+      toast.error("Connexion SMTP impossible", { description: (err as Error).message })
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     try {
+      // Bloc SMTP commun : vide = désactivé (création) / null explicite (édition)
+      const smtpInput = form.smtpEnabled && form.smtpHost.trim()
+        ? {
+            smtpHost: form.smtpHost.trim(),
+            smtpPort: Number(form.smtpPort) || 587,
+            smtpSecure: form.smtpSecure,
+            smtpUsername: form.smtpUsername.trim() || undefined,
+            ...(form.smtpPassword ? { smtpPassword: form.smtpPassword } : {}),
+          }
+        : { smtpHost: null }
+
       if (editing) {
         // Édition : ne rien envoyer de vide — password vide = inchangé
         const input: Record<string, unknown> = {
@@ -185,6 +261,7 @@ export function EmailAccountsCard() {
           allowSelfSigned: form.allowSelfSigned,
           syncIntervalMin: Number(form.syncIntervalMin) || 15,
           fetchDays: Number(form.fetchDays) || 30,
+          ...smtpInput,
         }
         if (form.password) input.password = form.password
         await update.mutateAsync({ id: editing.id, input })
@@ -199,6 +276,15 @@ export function EmailAccountsCard() {
           syncIntervalMin: Number(form.syncIntervalMin) || 15,
           fetchDays: Number(form.fetchDays) || 30,
           maxMessages: 100,
+          ...(form.smtpEnabled && form.smtpHost.trim()
+            ? {
+                smtpHost: form.smtpHost.trim(),
+                smtpPort: Number(form.smtpPort) || 587,
+                smtpSecure: form.smtpSecure,
+                smtpUsername: form.smtpUsername.trim() || undefined,
+                ...(form.smtpPassword ? { smtpPassword: form.smtpPassword } : {}),
+              }
+            : {}),
         }
         const res = await create.mutateAsync(input)
         toast.success("Compte email connecté 📬", {
@@ -255,10 +341,11 @@ export function EmailAccountsCard() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base font-medium">
           <Mail className="size-4 text-primary" aria-hidden />
-          Comptes email (IMAP)
+          Comptes email (IMAP + SMTP)
         </CardTitle>
         <CardDescription>
-          Vraies boîtes IMAP en lecture seule — mots de passe chiffrés, jamais stockés en clair.
+          Boîtes IMAP en lecture seule + envoi SMTP optionnel — mots de passe chiffrés (AES-256-GCM),
+          jamais stockés en clair ni renvoyés.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -319,6 +406,16 @@ export function EmailAccountsCard() {
                           Synchronisé
                         </Badge>
                       ) : null}
+                      {account.canSend && (
+                        <Badge
+                          variant="outline"
+                          className="gap-1 border-emerald-500/40 text-[10px] text-emerald-600 dark:text-emerald-400"
+                          title={`Envoi SMTP : ${account.smtpHost}:${account.smtpPort ?? 587}`}
+                        >
+                          <Send className="size-2.5" aria-hidden />
+                          SMTP
+                        </Badge>
+                      )}
                       <Badge variant="outline" className="gap-1 text-[10px]">
                         {account.emailCount} email{account.emailCount > 1 ? "s" : ""}
                       </Badge>
@@ -548,6 +645,159 @@ export function EmailAccountsCard() {
                 />
               </div>
             </div>
+
+            <Separator />
+
+            {/* ── Envoi SMTP (optionnel) ── */}
+            <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
+              <div>
+                <Label htmlFor="account-smtp" className="flex items-center gap-1.5 text-sm">
+                  <Send className="size-3.5 text-primary" aria-hidden />
+                  Envoi SMTP
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Répondre et écrire depuis Orbit (optionnel)
+                </p>
+              </div>
+              <Switch
+                id="account-smtp"
+                checked={form.smtpEnabled}
+                onCheckedChange={(v) => set("smtpEnabled", v)}
+                aria-label="Activer l'envoi SMTP"
+              />
+            </div>
+
+            {form.smtpEnabled && (
+              <div className="space-y-4 rounded-lg border border-border/40 bg-muted/20 p-3">
+                <div className="space-y-2">
+                  <Label>Serveurs courants</Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SMTP_PRESETS.map((preset) => (
+                      <button
+                        key={preset.host}
+                        type="button"
+                        onClick={() => {
+                          set("smtpHost", preset.host)
+                          set("smtpPort", preset.port)
+                          set("smtpSecure", preset.secure)
+                          if (!form.smtpUsername && form.username) {
+                            set("smtpUsername", form.username)
+                          }
+                        }}
+                        title={`${preset.host}:${preset.port} ${preset.secure ? "(TLS)" : "(STARTTLS)"}`}
+                        className={`rounded-full border px-2.5 py-0.5 text-xs transition-colors ${
+                          form.smtpHost === preset.host
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border/60 hover:bg-accent/40"
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-[1fr_100px]">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-smtp-host">Serveur SMTP</Label>
+                    <Input
+                      id="account-smtp-host"
+                      value={form.smtpHost}
+                      onChange={(e) => set("smtpHost", e.target.value)}
+                      placeholder="smtp.exemple.fr"
+                      required
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-smtp-port">Port</Label>
+                    <Input
+                      id="account-smtp-port"
+                      type="number"
+                      value={form.smtpPort}
+                      onChange={(e) => set("smtpPort", e.target.value)}
+                      min={1}
+                      max={65535}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
+                  <div>
+                    <Label htmlFor="account-smtp-secure" className="text-sm">
+                      {form.smtpSecure ? "TLS (465)" : "STARTTLS (587)"}
+                    </Label>
+                    <p className="text-xs text-muted-foreground">Mode de chiffrement</p>
+                  </div>
+                  <Switch
+                    id="account-smtp-secure"
+                    checked={form.smtpSecure}
+                    onCheckedChange={(v) => {
+                      set("smtpSecure", v)
+                      set("smtpPort", v ? "465" : "587")
+                    }}
+                  />
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-smtp-username">
+                      Identifiant <span className="text-muted-foreground">(IMAP si vide)</span>
+                    </Label>
+                    <Input
+                      id="account-smtp-username"
+                      value={form.smtpUsername}
+                      onChange={(e) => set("smtpUsername", e.target.value)}
+                      placeholder={form.username || "identifiant IMAP réutilisé"}
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="account-smtp-password">
+                      Mot de passe{" "}
+                      <span className="text-muted-foreground">(IMAP si vide{editing ? ", inchangé si vide" : ""})</span>
+                    </Label>
+                    <Input
+                      id="account-smtp-password"
+                      type="password"
+                      value={form.smtpPassword}
+                      onChange={(e) => set("smtpPassword", e.target.value)}
+                      placeholder="mot de passe d'application"
+                      autoComplete="new-password"
+                    />
+                  </div>
+                </div>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={handleTestSmtp}
+                  disabled={testSmtp.isPending}
+                >
+                  {testSmtp.isPending ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Send className="size-3.5" aria-hidden />
+                  )}
+                  Tester le SMTP
+                </Button>
+
+                {smtpTestResult && (
+                  <div
+                    role="status"
+                    className={`rounded-lg border p-3 text-xs leading-relaxed ${
+                      smtpTestResult.ok
+                        ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400"
+                        : "border-destructive/30 bg-destructive/5 text-destructive"
+                    }`}
+                  >
+                    {smtpTestResult.message}
+                  </div>
+                )}
+              </div>
+            )}
 
             <Separator />
 

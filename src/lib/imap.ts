@@ -24,7 +24,20 @@ import { ImapFlow } from "imapflow"
 import { simpleParser } from "mailparser"
 import { db } from "@/lib/db"
 import { decryptSecret } from "@/lib/secret-box"
+import { sanitizeEmailHtml, snippetFromText } from "@/lib/html-sanitize"
+import { saveAttachment, ATTACHMENT_MAX_COUNT } from "@/lib/attachments"
 import type { EmailAccount } from "@prisma/client"
+
+/** Structure d'une pièce jointe parsée par mailparser (typage local —
+ *  l'export ParsedAttachment n'est pas exposé par @types/mailparser). */
+type ParsedMailAttachment = {
+  filename?: string
+  contentType?: string
+  contentId?: string | false
+  related?: boolean
+  content?: Buffer
+  size?: number
+}
 
 /** Bornes de protection (corps tronqué, jamais de email géant en base). */
 const BODY_MAX_CHARS = 20_000
@@ -233,7 +246,8 @@ export async function syncEmailAccount(account: EmailAccount): Promise<AccountSy
       if (selection.length) {
         for await (const msg of client.fetch(
           selection,
-          { uid: true, internalDate: true, source: true },
+          // flags demandées → état lu/étoilé initial fidèle au serveur
+          { uid: true, internalDate: true, source: true, flags: true },
           { uid: true }
         )) {
           fetched++
@@ -245,10 +259,34 @@ export async function syncEmailAccount(account: EmailAccount): Promise<AccountSy
               (parsed.messageId ?? `imap-${account.id}-${msg.uid}`).replace(/[<>]/g, "").trim() ||
               `imap-${account.id}-${msg.uid}`
             const from = parsed.from?.value?.[0]
+            const htmlRaw = typeof parsed.html === "string" ? parsed.html : null
+            // Corps texte : partie text/plain → sinon HTML dégradé
             const body =
               (parsed.text ?? "").trim() ||
-              htmlToText(typeof parsed.html === "string" ? parsed.html : "")
+              htmlToText(htmlRaw ?? "")
+            // HTML blanchi (scripts/styles/onclick retirés — lib/html-sanitize)
+            const bodyHtml = sanitizeEmailHtml(htmlRaw)
             const received = parsed.date ?? msg.internalDate ?? now
+            // Drapeaux serveur : \Seen = déjà lu · \Flagged = étoilé/suivi
+            // (imapflow renvoie un Set<string> — conversion defensive)
+            const flags =
+              msg.flags instanceof Set
+                ? [...msg.flags]
+                : Array.isArray(msg.flags)
+                  ? msg.flags
+                  : []
+            // Fil de discussion : In-Reply-To prioritaire, sinon References[0]
+            const references =
+              typeof parsed.references === "string" ? parsed.references : ""
+            const threadId =
+              (parsed.inReplyTo ?? "").replace(/[<>]/g, "").trim() ||
+              references.split(/\s+/)[0]?.replace(/[<>]/g, "").trim() ||
+              null
+            // Destinataires « To » (JSON — SQLite sans String[])
+            const toObj = Array.isArray(parsed.to) ? parsed.to[0] : parsed.to
+            const tos = (toObj?.value ?? [])
+              .map((v) => v.address)
+              .filter((a): a is string => Boolean(a))
 
             const existing = await db.emailLog.findUnique({
               where: { userId_messageId: { userId: account.userId, messageId } },
@@ -256,19 +294,56 @@ export async function syncEmailAccount(account: EmailAccount): Promise<AccountSy
             })
             if (existing) continue // déjà synchronisé (upsert idempotent)
 
-            await db.emailLog.create({
+            const createdEmail = await db.emailLog.create({
               data: {
                 userId: account.userId,
                 accountId: account.id,
                 messageId,
                 fromAddress: from?.address ?? "inconnu@inconnu",
                 fromName: from?.name?.trim() || null,
+                toAddresses: tos.length ? tos : undefined,
                 subject: (parsed.subject ?? "").trim() || "(sans objet)",
+                snippet: snippetFromText(body) || undefined,
                 bodyText: body.slice(0, BODY_MAX_CHARS),
+                bodyHtml,
                 receivedAt: received instanceof Date ? received : new Date(received),
+                isRead: flags.includes("\\Seen"),
+                isStarred: flags.includes("\\Flagged"),
+                threadId,
+                uid: msg.uid ?? null,
               },
             })
             created++
+
+            // Pièces jointes : fichiers sur disque (storage/attachments) +
+            // métadonnées en base. Bornes : 10 PJ, 15 Mo chacune — une PJ
+            // illisible n'échoue jamais toute la sync.
+            const rawAtts = (parsed.attachments ?? []).slice(0, ATTACHMENT_MAX_COUNT) as ParsedMailAttachment[]
+            let storedAtts = 0
+            for (let i = 0; i < rawAtts.length; i++) {
+              const raw: ParsedMailAttachment = rawAtts[i]
+              const stored = await saveAttachment(createdEmail.id, raw, i)
+              if (!stored) continue
+              await db.emailAttachment
+                .create({
+                  data: {
+                    emailId: createdEmail.id,
+                    filename: stored.filename,
+                    contentType: stored.contentType,
+                    size: stored.size,
+                    contentId: stored.contentId,
+                    isInline: stored.isInline,
+                    storagePath: stored.storagePath,
+                  },
+                })
+                .catch(() => null)
+              storedAtts++
+            }
+            if (storedAtts > 0) {
+              await db.emailLog
+                .update({ where: { id: createdEmail.id }, data: { hasAttachments: true } })
+                .catch(() => {})
+            }
           } catch {
             // Un message illisible n'échoue jamais toute la sync
           }
@@ -337,4 +412,71 @@ export async function syncDueAccounts(): Promise<{ due: number; results: Account
     results.push(await syncEmailAccount(account))
   }
   return { due: due.length, results }
+}
+
+// ── Mise à jour des drapeaux côté serveur (best-effort) ─────────────────────
+// Orbit reste prudent avec le serveur IMAP : seul STORE de \Seen/\Flagged est
+// émis (jamais \Deleted ni EXPUNGE). Un échec réseau est SILENCIEUX — l'état
+// local (base) prime, la sync suivante réalignera les drapeaux manquants.
+
+/** Filtre les emails réellement rattachés à un compte IMAP avec UID connu. */
+export function imapTargets(
+  emails: Array<{ accountId: string | null; uid: number | null }>
+): { accountId: string; uids: number[] }[] {
+  const map = new Map<string, number[]>()
+  for (const e of emails) {
+    if (!e.accountId || e.uid == null) continue
+    const list = map.get(e.accountId) ?? []
+    list.push(e.uid)
+    map.set(e.accountId, list)
+  }
+  return [...map.entries()].map(([accountId, uids]) => ({ accountId, uids }))
+}
+
+/**
+ * Applique \Seen/\Flagged sur les messages IMAP d'un compte (≤ 50 UIDs par
+ * appel). RETOURNE toujours true/false — jamais d'exception, jamais bloquant.
+ */
+export async function setEmailImapFlags(
+  account: EmailAccount,
+  uids: number[],
+  opts: { seen?: boolean; starred?: boolean }
+): Promise<boolean> {
+  if (!uids.length) return false
+  let password: string
+  try {
+    password = decryptSecret(account.passwordEnc)
+  } catch {
+    return false
+  }
+  const client = imapClient({
+    host: account.imapHost,
+    port: account.imapPort,
+    secure: account.imapSecure,
+    username: account.username,
+    password,
+    allowSelfSigned: account.allowSelfSigned,
+  })
+  try {
+    await client.connect()
+    const lock = await client.getMailboxLock("INBOX")
+    try {
+      const range = uids.slice(0, 50).join(",")
+      if (opts.seen !== undefined) {
+        if (opts.seen) await client.messageFlagsAdd(range, ["\\Seen"], { uid: true })
+        else await client.messageFlagsRemove(range, ["\\Seen"], { uid: true })
+      }
+      if (opts.starred !== undefined) {
+        if (opts.starred) await client.messageFlagsAdd(range, ["\\Flagged"], { uid: true })
+        else await client.messageFlagsRemove(range, ["\\Flagged"], { uid: true })
+      }
+      return true
+    } finally {
+      lock.release()
+    }
+  } catch {
+    return false // silencieux : best-effort, l'état local prime
+  } finally {
+    await closeClient(client)
+  }
 }
