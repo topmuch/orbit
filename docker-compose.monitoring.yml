@@ -1,0 +1,185 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — docker-compose de MONITORING (Prometheus · Grafana · Loki · Promtail
+# · cAdvisor · node-exporter)
+# ───────────────────────────────────────────────────────────────────────────
+# Démarrage (APRÈS la stack de production, voir plus bas) :
+#   docker compose -f docker-compose.monitoring.yml --env-file .env.production up -d
+#
+# IMPORTANT — ORDRE DE DÉMARRAGE :
+#   1. docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+#   2. docker compose -f docker-compose.monitoring.yml --env-file .env.production up -d
+# La stack de production CRÉE le réseau orbit_network ; ce fichier le déclare
+# `external: true`. Démarrer le monitoring en premier échoue avec
+# « network orbit_network not found ».
+#
+# Accès :
+#   • Grafana      https://grafana.$DOMAIN  (via Caddy — prod) ou
+#                  http://127.0.0.1:3001 en local sur le serveur
+#   • Prometheus   https://prometheus.$DOMAIN (via Caddy) ou 127.0.0.1:9090
+#   Les autres services (loki, promtail, cadvisor 127.0.0.1:8081,
+#   node-exporter 127.0.0.1:9100) restent internes au réseau / loopback :
+#   ils sont scrapés par Prometheus, pas exposés publiquement.
+#
+# Variables attendues dans .env.production :
+#   GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD  (compte Grafana initial)
+#   DOMAIN_NAME (optionnel ici — utilisé pour GF_SERVER_ROOT_URL)
+#
+# Configs montées (fournies par le dossier monitoring/ du repo) :
+#   monitoring/prometheus/prometheus.yml + alerts.yml  → /etc/prometheus/
+#   monitoring/loki/loki.yml                           → /etc/loki/
+#   monitoring/promtail/config.yml                     → /etc/promtail/
+#   monitoring/grafana/provisioning/… + dashboards/…   → /etc/grafana/
+# La cible d'export du web est /api/metrics (format Prometheus, secret
+# optionnel METRICS_SECRET côté prod) — voir monitoring/prometheus/.
+# ═══════════════════════════════════════════════════════════════════════════
+name: orbit-monitoring
+
+services:
+  # ── Prometheus : collecte + alertes ──────────────────────────────────────
+  # Scrape web:3000/api/metrics, cadvisor:8080, node-exporter:9100 et
+  # lui-même. Les règles d'alerte (alerts.yml) sont évaluées toutes les 15 s.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: orbit-prometheus
+    restart: unless-stopped
+    volumes:
+      # :ro — la config est gérée par Git (monitoring/), pas par l'UI
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus # TSDB (séries temporelles)
+    ports:
+      # Debug local uniquement ; l'accès distant passe par
+      # https://prometheus.$DOMAIN (Caddy, docker-compose.prod.yml)
+      - "127.0.0.1:9090:9090"
+    networks:
+      - orbit_network
+
+  # ── Grafana : dashboards (provisionnés depuis monitoring/) ───────────────
+  # Provisioning auto de la source « orbit-prometheus » et du dashboard
+  # « orbit-overview ». Le compte admin vient de .env.production.
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: orbit-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      # Compte administrateur initial (GRAFANA_ADMIN_* dans .env.production)
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD manquant dans .env.production}"
+      # Pas d'auto-inscription : un seul compte admin + éventuels comptes
+      # créés à la main dans l'UI.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Liens/redirects corrects derrière le reverse proxy Caddy
+      GF_SERVER_ROOT_URL: "https://grafana.${DOMAIN_NAME:-localhost}"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana # comptes/permissions, dashboards modifiés
+    ports:
+      - "127.0.0.1:3001:3000" # debug local ; public via grafana.$DOMAIN (Caddy)
+    networks:
+      - orbit_network
+
+  # ── Loki : stockage des logs (mononode, filesystem, rétention ~14 j) ─────
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: orbit-loki
+    restart: unless-stopped
+    # L'image démarre par défaut sur /etc/loki/local-config.yaml ; notre
+    # config (monitoring/loki/loki.yml) est montée sous un autre nom.
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki # chunks + index + compactor
+    networks:
+      - orbit_network
+
+  # ── Promtail : collecte des logs de TOUS les conteneurs Docker ──────────
+  # Découverte via le socket Docker (lecture seule). Les positions de lecture
+  # sont en /tmp (reprise après redémarrage best-effort).
+  promtail:
+    image: grafana/promtail:3.4.2
+    container_name: orbit-promtail
+    restart: unless-stopped
+    depends_on:
+      - loki
+    volumes:
+      - ./monitoring/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro # fichiers JSON des logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro             # découverte des conteneurs
+    networks:
+      - orbit_network
+
+  # ── cAdvisor : métriques des conteneurs (CPU/RAM/réseau par conteneur) ───
+  # Montages ro standards + socket Docker. Sur certains noyaux (cgroups v2),
+  # si cAdvisor redémarre en boucle ou ne renvoie rien, décommenter
+  # `privileged: true`.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.51.0
+    container_name: orbit-cadvisor
+    restart: unless-stopped
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro # stats disques
+    # privileged: true
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks:
+      - orbit_network
+
+  # ── node-exporter : métriques de la MACHINE HÔTE ─────────────────────────
+  # /proc, /sys et / montés en lecture seule avec propagation rslave (les
+  # montages effectués après le démarrage du conteneur restent visibles).
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: orbit-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      # Ignore les FS du conteneur lui-même ; « $$ » = « $ » après
+      # interpolation compose
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - type: bind
+        source: /proc
+        target: /host/proc
+        read_only: true
+        bind:
+          propagation: rslave
+      - type: bind
+        source: /sys
+        target: /host/sys
+        read_only: true
+        bind:
+          propagation: rslave
+      - type: bind
+        source: /
+        target: /rootfs
+        read_only: true
+        bind:
+          propagation: rslave
+    ports:
+      - "127.0.0.1:9100:9100"
+    networks:
+      - orbit_network
+
+# ── Réseau créé par docker-compose.prod.yml (DÉMARRER LA PROD D'ABORD) ──────
+networks:
+  orbit_network:
+    external: true
+    name: orbit_network
+
+# ── Volumes (noms explicites, inspection facile) ─────────────────────────────
+volumes:
+  prometheus_data:
+    name: orbit_prometheus_data
+  grafana_data:
+    name: orbit_grafana_data
+  loki_data:
+    name: orbit_loki_data

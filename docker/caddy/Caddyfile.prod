@@ -1,0 +1,83 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Caddyfile de PRODUCTION (reverse proxy, HTTPS automatique ACME)
+# ───────────────────────────────────────────────────────────────────────────
+# Monté par docker-compose.prod.yml dans le conteneur caddy :
+#   ./docker/caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+# (l'image caddy démarre par défaut avec --config /etc/caddy/Caddyfile)
+#
+# IMPORTANT : ce fichier s'appelle « Caddyfile.prod » et PAS « Caddyfile »,
+# car le .gitignore du repo ignore tout fichier nommé exactement
+# « Caddyfile » (n'importe quel niveau) — un Caddyfile serait perdu au
+# prochain commit.
+#
+# Variables d'environnement (fournies par docker-compose.prod.yml depuis
+# .env.production) :
+#   {$DOMAIN_NAME}  domaine principal  (ex. orbit.exemple.fr)
+#   {$ACME_EMAIL}   email du compte ACME Let's Encrypt (alertes expiration)
+#
+# Prérequis premier lancement : enregistrement DNS A du domaine vers le
+# serveur, ports 80 et 443 ouverts. Caddy obtient et renouvelle les
+# certificats tout seul (challenge HTTP-01/TLS-ALPN, stockés dans le
+# volume caddy_data).
+#
+# DNS : prévoir un enregistrement A (ou CNAME) pour le domaine apex ET
+# chacun des sous-domaines : www, grafana, prometheus.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Options globales ────────────────────────────────────────────────────────
+{
+        # Email ACME : compte Let's Encrypt + courriers d'expiration.
+        email {$ACME_EMAIL}
+
+        # ── VARIANTES DE TESTS (décommenter selon le cas) ──
+        # ACME « staging » : certificats non reconnus par les navigateurs, mais
+        # quota Let's Encrypt préservé pendant les tests de renouvellement :
+        #   acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+        #
+        # Domaine privé / LAN : certificats auto-signés par Caddy (pas d'ACME du
+        # tout). « tls internal » se place DANS le bloc du site concerné, pas
+        # ici :
+        #   orbit.lan {
+        #       tls internal
+        #       reverse_proxy web:3000
+        #   }
+}
+
+# ── Site principal ──────────────────────────────────────────────────────────
+{$DOMAIN_NAME} {
+        # Compression des réponses (zstd puis gzip selon le navigateur).
+        encode zstd gzip
+
+        header {
+                # Discrétion : ne pas annoncer le serveur.
+                -Server
+                # HSTS, X-Frame-Options, CSP, Permissions-Policy… : émis par
+                # l'application Next.js elle-même (next.config.ts, production
+                # uniquement) — aucune duplication ici, source unique.
+        }
+
+        # L'application web (nom de service résolu via le réseau Docker
+        # orbit_network — pas d'adresse IP en dur).
+        reverse_proxy web:3000
+}
+
+# ── Sous-domaine www : simple redirection 301 vers le domaine apex ──────────
+www.{$DOMAIN_NAME} {
+        redir https://{$DOMAIN_NAME}{uri} 301
+}
+
+# ── Grafana (stack monitoring — docker-compose.monitoring.yml) ──────────────
+# grafana/prometheus vivent dans l'AUTRE fichier compose mais partagent le
+# réseau orbit_network : Caddy les résout par nom de service.
+grafana.{$DOMAIN_NAME} {
+        encode zstd gzip
+        header -Server
+        reverse_proxy grafana:3000
+}
+
+# ── Prometheus (stack monitoring) ───────────────────────────────────────────
+prometheus.{$DOMAIN_NAME} {
+        encode zstd gzip
+        header -Server
+        reverse_proxy prometheus:9090
+}

@@ -1,0 +1,63 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Loki mononode : stockage des logs (production)
+# ───────────────────────────────────────────────────────────────────────────
+# Reprise de la structure du local-config officiel Loki (mode single binary,
+# filesystem, sans dépendance externe) : convient à une prod mono-serveur.
+# Rétention ~14 jours (336 h) assurée par le compactor — pas de deleteur
+# ni de passerelle de suppression : simple et suffisant.
+# Volume compose : ./monitoring/loki → /loki (chunks, index, compactor).
+# ═══════════════════════════════════════════════════════════════════════════
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  # gRPC pour le compactor/ingester interne (standard du local-config).
+  grpc_listen_port: 9096
+
+common:
+  # Adresse annoncée par cette instance (mononode → boucle locale).
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  # Mononode : 1 seule réplique, anneau en mémoire (pas de Consul/etcd).
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    # Date de démarrage du schéma (premier jour où Loki a indexé) :
+    # 2024-01-01, TSDB + filesystem, schéma v13 — combo actuel recommandé.
+    # Quotée : Loki attend une chaîne « YYYY-MM-DD » (au sens strict, tous
+    # les parseurs YAML voient bien une string, pas un timestamp typé).
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Rejeter les logs trop vieux (horloge dérivée des conteneurs) :
+  # évite les erreurs « entry too far in the past » après une pause/restore.
+  reject_old_samples: true
+  reject_old_samples_max_age: 24h
+  # Rétention LOGIQUE de 14 jours (336 h) — appliquée par le compactor
+  # quand retention_enabled: true (voir plus bas).
+  retention_period: 336h
+  # chunk_idle_period (clef du local-config officiel) : les chunks inactifs
+  # sont flushés après 5 min d'inactivité → pas de chunk ouvert indéfiniment.
+  chunk_idle_period: 5m
+
+compactor:
+  working_directory: /loki/compactor
+  # Active l'application de la rétention (limits_config.retention_period) :
+  # le compactor supprime les chunks/tables au-delà de 336 h, sans service
+  # supplémentaire à opérer.
+  retention_enabled: true

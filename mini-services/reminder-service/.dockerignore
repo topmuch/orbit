@@ -1,0 +1,20 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — .dockerignore du reminder-service (contexte mini-services/
+# reminder-service). Le service est en Bun PUR sans dépendance npm : le
+# contexte n'a besoin que de package.json et index.ts.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Dépendances de dev locales (jamais installées dans l'image)
+node_modules
+
+# Secrets (chargés en dev via ../../.env — en conteneur tout vient du compose)
+.env
+.env.*
+
+# Logs du service local
+*.log
+service.log
+
+# Divers
+.DS_Store
+*.pid

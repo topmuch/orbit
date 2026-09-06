@@ -1,0 +1,106 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — CI (lint + type-check + build)
+# ───────────────────────────────────────────────────────────────────────────
+# Objectif : valider CHAQUE push/PR sur main AVANT le déploiement (deploy.yml
+# prend le relais sur main après succès).
+#
+# Architecture réelle du projet (ne pas confondre avec la spec d'origine) :
+#   • Next.js 16 App Router à la RACINE du repo (pas de monorepo apps/).
+#   • Runtime BUN exclusivement (bun.lock — JAMAIS npm/package-lock.json).
+#   • Base de données SQLite (fichier local) → AUCUN service conteneur
+#     PostgreSQL/Redis n'est nécessaire en CI : c'est un atout (runner plus
+#     léger, pas d'attente de healthcheck de conteneur, pas de credentials).
+#   • PAS de suite de tests automatisés : tests/ contient des serveurs mock
+#     pour la QA manuelle (IMAP/SMTP/Push), pas des tests exécutables en CI.
+#     La CI est donc honnêtement : lint → type-check → build. Ajouter des
+#     tests ici le jour où ils existeront.
+#   • next.config.ts a `typescript.ignoreBuildErrors: true` (héritage
+#     historique) → l'étape `tsc --noEmit` ci-dessous est la SEULE vraie
+#     barrière de types : elle doit échouer avant le build si le code casse.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Principe du moindre privilège : la CI n'a besoin que de lire le code.
+permissions:
+  contents: read
+
+# Un seul run actif par branche/ref : les pushs successifs annulent les
+# anciens runs en cours (inutile de finir une CI déjà obsolète).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-type-build:
+    name: Lint + type-check + build
+    runs-on: ubuntu-latest
+    # Garde-fou : un build Next.js normal prend ~3-5 min ; 15 min laisse la
+    # marge pour un runner lent ou une régression de perf dépendances.
+    timeout-minutes: 15
+
+    steps:
+      # ── 1. Récupération du code ─────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Installation de Bun ───────────────────────────────────────────
+      # oven-sh/setup-bun@v2 : `cache: true` met en cache le répertoire
+      # d'installation de Bun (~/.bun/install/cache) ; `cache-dependency-path`
+      # désigne le lockfile dont le hash invalide le cache (bun.lock, format
+      # texte de Bun ≥ 1.1 — PAS bun.lockb, PAS package-lock.json).
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+          cache: true
+          cache-dependency-path: bun.lock
+
+      # ── 3. Dépendances ───────────────────────────────────────────────────
+      # --frozen-lockfile : échoue si bun.lock et package.json divergent
+      # (garantit des builds reproductibles ; aucune résolution réseau).
+      - name: Installation des dépendances
+        run: bun install --frozen-lockfile
+
+      # ── 4. Client Prisma ─────────────────────────────────────────────────
+      # OBLIGATOIRE AVANT le build : src/lib/db.ts importe @prisma/client
+      # dont le code est GÉNÉRÉ (node_modules/.prisma/client). Sans cette
+      # étape, `next build` échoue à résoudre les modèles (Prisma 6, SQLite).
+      # `prisma generate` ne se connecte à aucune base : aucune DB n'est
+      # nécessaire — c'est l'avantage SQLite de ce projet.
+      - name: Génération du client Prisma
+        run: bunx prisma generate
+
+      # ── 5. ESLint 9 (config flat eslint.config.mjs) ──────────────────────
+      - name: Lint
+        run: bun run lint
+
+      # ── 6. Type-check strict ─────────────────────────────────────────────
+      # Portée volontairement RESTREINTE via tsconfig.ci.json : le projet
+      # complet (`tsc --noEmit` nu) ÉCHOUE sur scripts/, skills/ et tests/
+      # (fichiers de la sandbox hors application). tsconfig.ci.json étend
+      # tsconfig.json mais n'inclut que src/** + next.config.ts — next-env.d.ts
+      # est exclu car généré par `next dev/build` (il n'existe pas encore à ce
+      # stade en CI ; il est aussi gitignoré).
+      - name: Type-check (src + next.config.ts)
+        run: bunx tsc --noEmit -p tsconfig.ci.json
+
+      # ── 7. Build de production ───────────────────────────────────────────
+      # `bun run build` = next build (output: "standalone") + copie de
+      # .next/static et public/ dans .next/standalone/ (package.json).
+      # Variables dummy : le build IMPORTE les modules de routes (collecte de
+      # données de pages) → PrismaClient exige DATABASE_URL présent (aucune
+      # connexion réelle n'est ouverte : fichier SQLite jamais touché) et
+      # AUTH_SECRET est exigé par src/lib/auth.ts. AUCUN NEXT_PUBLIC_* n'existe
+      # dans le code (VAPID passe par l'API serveur, jamais exposé au bundle).
+      - name: Build Next.js (standalone)
+        env:
+          DATABASE_URL: "file:./db/ci.db"
+          AUTH_SECRET: "ci-dummy-secret-pas-un-vrai-secret"
+        run: bun run build

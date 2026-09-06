@@ -1,0 +1,250 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Déploiement production (build + push GHCR → SSH → docker compose)
+# ───────────────────────────────────────────────────────────────────────────
+# Chaîne complète sur CHAQUE push main (ou lancement manuel workflow_dispatch
+# depuis l'onglet Actions → « Run workflow ») :
+#   1. build-push : 3 images Docker poussées sur ghcr.io (registry GitHub)
+#   2. deploy     : SSH sur le serveur Ubuntu → git pull + docker compose pull
+#                   + up -d → health check https://<domaine>/api/health
+#
+# SECRETS/VARIABLES À CRÉER (Settings → Secrets and variables → Actions) :
+#   Onglet « Secrets » (chiffrés, jamais affichés dans les logs) :
+#     • SSH_PRIVATE_KEY — clé PRIVÉE ouvrant le serveur (cat ~/.ssh/id_ed25519 ;
+#       la partie publique doit être dans ~/.ssh/authorized_keys du serveur).
+#     • SERVER_HOST     — IP ou nom DNS du serveur Ubuntu.
+#     • SERVER_USER     — utilisateur SSH (doit pouvoir exécuter docker —
+#       groupe docker, et cloner le repo dans /opt/orbit).
+#   Onglet « Variables » (non sensibles) :
+#     • DOMAIN_NAME     — domaine public servi (ex. orbit.exemple.fr), utilisé
+#       par le health check et le résumé.
+#
+# POURQUOI GITHUB_TOKEN SUFFIT POUR GHCR : le token intégré
+# (secrets.GITHUB_TOKEN) est automatiquement provisionné pour chaque run et
+# autorisé à pousser les packages du MÊME repo dès que `permissions:
+# packages: write` est déclaré — aucun PAT à créer/rotationner. Le push des
+# images ghcr.io/topmuch/orbit/* reste ainsi dans le périmètre de ce repo.
+#
+# Fichiers référencés (créés en parallèle, tâche 19-a — référencés tels quels) :
+#   • ./Dockerfile (racine, image web Next.js standalone) + .dockerignore
+#   • ./mini-services/reminder-service/Dockerfile
+#   • docker-compose.prod.yml (services web, ai-api, reminder ; lit IMAGE_TAG)
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # permet de relancer un déploiement à la main
+
+# packages: write → pousser les images sur ghcr.io (GITHUB_TOKEN, même repo).
+permissions:
+  contents: read
+  packages: write
+
+# Sérialise les déploiements : un 2e push pendant un déploiement ATTEND (pas
+# d'annulation — ne jamais couper un `docker compose up` en plein milieu).
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════
+  # JOB 1 — Build & push des 3 images sur GHCR
+  # ═══════════════════════════════════════════════════════════════════════
+  build-push:
+    name: Build & push images GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Buildx est requis pour le cache de build GitHub Actions (type=gha) :
+      # les couches Docker sont mises en cache entre les runs (node_modules,
+      # pip install…) → les rebuilds incrémentaux passent de ~10 min à ~2 min.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Connexion GHCR avec le token intégré du run (cf. commentaire d'en-tête).
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Image web (Next.js 16, sortie standalone) ─────────────────────────
+      # Contexte = racine du repo : le Dockerfile (tâche 19-a) copie src/,
+      # public/, next.config.ts… et construit avec bun. L'.dockerignore (19-a)
+      # exclut node_modules/.next/db/ pour garder le contexte léger.
+      # Tags : SHA exact (déploiements reproductibles + rollback) + latest.
+      # push uniquement sur main (workflow_dispatch depuis une branche de
+      # travail = simple build de vérification, rien n'est publié).
+      - name: Build & push — web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/topmuch/orbit/web:${{ github.sha }}
+            ghcr.io/topmuch/orbit/web:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Image ai-service (FastAPI + uvicorn, docker/ai-service) ───────────
+      # Ne contient PAS Ollama (image séparée, cf. docker-compose.yml dev) :
+      # le service interroge OLLAMA_URL défini dans docker-compose.prod.yml.
+      - name: Build & push — ai-service
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/ai-service
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/topmuch/orbit/ai-service:${{ github.sha }}
+            ghcr.io/topmuch/orbit/ai-service:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Image reminder (mini-services/reminder-service, bun) ─────────────
+      # Planificateur de rappels : scan périodique → POST /api/notify (secret
+      # de service). Dockerfile créé par la tâche 19-a — référencé tel quel.
+      - name: Build & push — reminder
+        uses: docker/build-push-action@v6
+        with:
+          context: ./mini-services/reminder-service
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/topmuch/orbit/reminder:${{ github.sha }}
+            ghcr.io/topmuch/orbit/reminder:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # JOB 2 — Déploiement SSH sur le serveur Ubuntu (/opt/orbit)
+  # ═══════════════════════════════════════════════════════════════════════
+  deploy:
+    name: Deploy sur le serveur
+    needs: build-push
+    # Only deploy on main (push ou lancement manuel depuis la branche main).
+    if: ${{ github.ref == 'refs/heads/main' }}
+
+    # Environnement GitHub « production » : SANS configuration particulière ce
+    # n'est qu'une étiquette (traçabilité dans l'onglet Deployments). Pour en
+    # faire une validation manuelle : Settings → Environments → New environment
+    # « production » → ajouter des « Required reviewers » → le job attendra
+    # leur approbation avant de toucher au serveur.
+    environment: production
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # Charge SSH_PRIVATE_KEY dans un ssh-agent du runner : les étapes
+      # suivantes n'ont plus qu'à faire `ssh` (SSH_AUTH_SOCK positionné).
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # ── Déploiement proprement dit ────────────────────────────────────────
+      # StrictHostKeyChecking=accept-new : la 1re connexion enregistre
+      # l'empreinte du serveur (protection anti-MITM les fois suivantes)
+      # sans exiger une entrée known_hosts pré-remplie. Alternative
+      # « pro » : pré-hacher l'empreinte et la déclarer via l'entrée
+      # `ssh-known-hosts` de webfactory/ssh-agent (ssh-keyscan -H <host>).
+      # IMAGE_TAG (SHA exact) est exporté : docker-compose.prod.yml résout
+      # les images ghcr.io/topmuch/orbit/*:${IMAGE_TAG} — d'où le `pull`
+      # des services web, ai-api, reminder AVANT le `up -d`.
+      - name: Déploiement (/opt/orbit, image ${{ github.sha }})
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new "${SERVER_USER}@${SERVER_HOST}" "IMAGE_TAG=${IMAGE_TAG} bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/orbit
+          echo "→ git pull origin main…"
+          git pull origin main
+          echo "→ docker compose pull (web, ai-api, reminder) tag ${IMAGE_TAG}…"
+          docker compose -f docker-compose.prod.yml --env-file .env.production pull web ai-api reminder
+          echo "→ docker compose up -d --remove-orphans…"
+          docker compose -f docker-compose.prod.yml --env-file .env.production up -d --remove-orphans
+          echo "→ Nettoyage des images dangling…"
+          docker image prune -f
+          echo "✅ Déploiement appliqué (IMAGE_TAG=${IMAGE_TAG})"
+          REMOTE
+
+      # ── Health check avec retry (30 × 10 s) ───────────────────────────────
+      # L'image web démarre + les conteneurs se recréent : le service peut
+      # mettre 1-2 min à répondre. On sonde /api/health jusqu'à 5 minutes.
+      - name: Health check (https://${{ vars.DOMAIN_NAME }}/api/health)
+        run: |
+          url="https://${{ vars.DOMAIN_NAME }}/api/health"
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 "$url" >/dev/null 2>&1; then
+              echo "✅ Service en ligne après ${i} tentative(s) : ${url}"
+              ok=1
+              break
+            fi
+            echo "… tentative ${i}/30 : pas encore prêt, nouvel essai dans 10 s"
+            sleep 10
+          done
+          if [ "$ok" -ne 1 ]; then
+            {
+              echo ""
+              echo "❌ ÉCHEC DU HEALTH CHECK après 30 tentatives (5 min) : ${url}"
+              echo ""
+              echo "─── Diagnostic sur le serveur (SSH) ─────────────────────────"
+              echo "  cd /opt/orbit"
+              echo "  docker compose -f docker-compose.prod.yml --env-file .env.production ps"
+              echo "  docker compose -f docker-compose.prod.yml --env-file .env.production logs --tail=100 web"
+              echo "  docker compose -f docker-compose.prod.yml --env-file .env.production logs --tail=50 ai-api reminder"
+              echo ""
+              echo "─── Rollback vers la version précédente (SSH, /opt/orbit) ──"
+              echo "  # retrouver l'ancien SHA : docker images | grep 'ghcr.io/topmuch/orbit/web'"
+              echo "  IMAGE_TAG=<ancien-sha> docker compose -f docker-compose.prod.yml --env-file .env.production up -d"
+              echo "  # (les images ne sont pas supprimées : le SHA précédent reste disponible sur GHCR)"
+            } >&2
+            exit 1
+          fi
+
+      # ── Résumé visible dans l'onglet Summary du run ───────────────────────
+      # N.B. : on n'y écrit JAMAIS de secrets (ils seraient masqués "***" —
+      # inutiles — ou pire, divulgables par copié-collé) ni de contenu non
+      # fiable type message de commit (injection shell) : SHA, acteur, URL.
+      - name: Résumé du déploiement
+        run: |
+          {
+            echo "## 🛰️ Déploiement Orbit — production"
+            echo ""
+            echo "sha=${{ github.sha }}"
+            echo ""
+            echo "- **Commit** : \`${{ github.sha }}\` sur \`main\`"
+            echo "- **Déclenché par** : \`${{ github.actor }}\`"
+            echo "- **Images GHCR** : \`web\` · \`ai-service\` · \`reminder\` — tags \`${{ github.sha }}\` + \`latest\`"
+            echo "- **Santé** : ✅ https://${{ vars.DOMAIN_NAME }}/api/health"
+            echo "- **Rollback** (sur le serveur) : \`IMAGE_TAG=<ancien-sha> docker compose -f docker-compose.prod.yml --env-file .env.production up -d\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── ROLLBACK MANUEL (optionnel, non activé) ───────────────────────────
+      # Décommenter pour un run de rollback explicite, puis relancer ce
+      # workflow avec l'input souhaitée (ajouter `inputs: { image_tag: … }`
+      # sous `workflow_dispatch:`) :
+      #
+      # - name: Rollback vers un SHA précédent
+      #   env:
+      #     SERVER_HOST: ${{ secrets.SERVER_HOST }}
+      #     SERVER_USER: ${{ secrets.SERVER_USER }}
+      #     ROLLBACK_TAG: ${{ inputs.image_tag }}
+      #   run: |
+      #     ssh -o StrictHostKeyChecking=accept-new "${SERVER_USER}@${SERVER_HOST}" "IMAGE_TAG=${ROLLBACK_TAG} bash -s" <<'REMOTE'
+      #     set -euo pipefail
+      #     cd /opt/orbit
+      #     docker compose -f docker-compose.prod.yml --env-file .env.production pull web ai-api reminder
+      #     docker compose -f docker-compose.prod.yml --env-file .env.production up -d --remove-orphans
+      #     REMOTE

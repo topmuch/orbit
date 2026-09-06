@@ -1,0 +1,270 @@
+{
+  "uid": "orbit-overview",
+  "title": "Orbit — Vue d'ensemble",
+  "description": "Supervision de la production Orbit : santé des services applicatifs (Prometheus), conteneurs Docker (cAdvisor), machine hôte (node-exporter). Les panneaux utilisent la datasource Prometheus par défaut (provisionnée : « Orbit Prometheus »).",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "État des services (Orbit)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Orbit app",
+      "description": "orbit_up — 1 si l'application répond au scrape /api/metrics (job orbit-web).",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "orbit_up", "legendFormat": "app" } ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "color": "red", "index": 0, "text": "DOWN" } } },
+            { "type": "value", "options": { "1": { "color": "green", "index": 1, "text": "UP" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false },
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Base de données",
+      "description": "orbit_db_up — 1 si l'app arrive à joindre sa base (PostgreSQL en production).",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "orbit_db_up", "legendFormat": "db" } ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "color": "red", "index": 0, "text": "DOWN" } } },
+            { "type": "value", "options": { "1": { "color": "green", "index": 1, "text": "UP" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false },
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Service IA",
+      "description": "orbit_ai_service_up — 1 si le micro-service IA (FastAPI + Ollama) répond.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "orbit_ai_service_up", "legendFormat": "ia" } ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "color": "red", "index": 0, "text": "DOWN" } } },
+            { "type": "value", "options": { "1": { "color": "green", "index": 1, "text": "UP" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false },
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Rappels",
+      "description": "orbit_reminder_service_up — 1 si le service de rappels (notifications push, syncs IMAP) tourne.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [ { "refId": "A", "expr": "orbit_reminder_service_up", "legendFormat": "rappels" } ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "color": "red", "index": 0, "text": "DOWN" } } },
+            { "type": "value", "options": { "1": { "color": "green", "index": 1, "text": "UP" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false },
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Conteneurs Docker (cAdvisor)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "CPU par conteneur (%)",
+      "description": "Usage CPU par conteneur. cAdvisor récent expose le nom du conteneur dans le label « name » (l'ancien « container_name » est déprécié/retiré) → agrégation by (name). Exclusion des séries racines/métradonnées via container!=\"\".",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{container!=\"\"}[2m])) * 100", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Mémoire par conteneur",
+      "description": "Mémoire de travail (working set) par conteneur — c'est la valeur vue/enforçable par le noyau (plus proche du docker stats). Label « name » (cAdvisor récent), container!=\"\" exclut les séries vides.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (name) (container_memory_working_set_bytes{container!=\"\"})", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Machine hôte (node-exporter)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Charge hôte",
+      "description": "Load average 1 / 5 / 15 minutes (node_load1, node_load5, node_load15). À comparer au nombre de cœurs de la machine.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "node_load1", "legendFormat": "charge 1 min" },
+        { "refId": "B", "expr": "node_load5", "legendFormat": "charge 5 min" },
+        { "refId": "C", "expr": "node_load15", "legendFormat": "charge 15 min" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Mémoire hôte utilisée (%)",
+      "description": "100 × (1 − MemAvailable / MemTotal). Seuils : jaune à 80 %, rouge à 95 % (alerte HostMemoryHigh côté Prometheus).",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "legendFormat": "utilisée" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 80 }, { "color": "red", "value": 95 } ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Disque racine disponible (%)",
+      "description": "100 × node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}. Seuils : rouge sous 10 % (alerte HostDiskAlmostFull côté Prometheus), jaune sous 20 %.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}", "legendFormat": "disponible" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 10 }, { "color": "green", "value": 20 } ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    }
+  ]
+}

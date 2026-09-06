@@ -1,0 +1,29 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Provisionnement Grafana : source de données Prometheus
+# ───────────────────────────────────────────────────────────────────────────
+# Monté par docker-compose.monitoring.yml dans
+# /etc/grafana/provisioning/datasources/ → chargé au démarrage de Grafana,
+# sans intervention manuelle. « prometheus » est résolu via le réseau
+# Docker orbit_network (service du compose monitoring).
+# ═══════════════════════════════════════════════════════════════════════════
+
+apiVersion: 1
+
+datasources:
+  - name: Orbit Prometheus
+    type: prometheus
+    # access « proxy » : les requêtes passent par le serveur Grafana
+    # (le navigateur n'a pas besoin d'atteindre prometheus:9090).
+    access: proxy
+    url: http://prometheus:9090
+    # Source par défaut : les panneaux du dashboard « orbit-overview »
+    # n'ont PAS de datasource explicite → ils utilisent celle-ci.
+    isDefault: true
+    # Identifiant stable (réutilisable dans les dashboards importés,
+    # ex. variable ${DS_ORBIT_PROMETHEUS} ou datasource uid explicite).
+    uid: orbit-prometheus
+    # Non modifiable depuis l'UI Grafana : la source est gérée par Git.
+    editable: false
+    # Intervalle par défaut des requêtes (15 s = scrape_interval Prometheus).
+    jsonData:
+      timeInterval: 15s

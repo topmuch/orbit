@@ -1,0 +1,56 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Prometheus : scrape + évaluation des alertes (production)
+# ───────────────────────────────────────────────────────────────────────────
+# Scrape interval global court (15 s) : le dashboard Grafana se rafraîchit
+# toutes les 30 s, on garde une marge de 2 points par rafraîchissement.
+# Targets résolues via le réseau Docker `orbit_network` (noms de services).
+# ═══════════════════════════════════════════════════════════════════════════
+
+global:
+  # Fréquence de collecte de toutes les cibles (15 s = bon compromis
+  # réactivité / charge — 4 jobs seulement).
+  scrape_interval: 15s
+  # Fréquence d'évaluation des règles d'alerte (alerts.yml).
+  evaluation_interval: 15s
+
+# Règles d'alerte Orbit (montées par docker-compose.monitoring.yml
+# en /etc/prometheus/alerts.yml — voir monitoring/prometheus/alerts.yml).
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # ── Prometheus lui-même (self-monitoring) ────────────────────────────────
+  # Permet de vérifier que le scraper est vivant (up{job="prometheus"}) et
+  # d'alerter si la stack de monitoring tombe.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ── Application web Orbit (Next.js, conteneur `web`) ─────────────────────
+  # L'app expose ses métriques au format Prometheus sur /api/metrics :
+  #   orbit_up, orbit_db_up, orbit_db_latency_ms, orbit_ai_service_up,
+  #   orbit_reminder_service_up, orbit_uptime_seconds,
+  #   orbit_version_info{version="..."}
+  - job_name: orbit-web
+    # L'app est joignable sur le réseau orbit_network via son nom de service.
+    static_configs:
+      - targets: ['web:3000']
+    metrics_path: /api/metrics
+    # Conserve les labels posés par l'export lui-même (ex. version) au lieu
+    # de les préfixer/écraser par ceux du scrape.
+    honor_labels: true
+    # Timeout spécifique : /api/metrics interroge la base et les services
+    # en aval — on borne à 10 s (l'intervalle global est de 15 s).
+    scrape_timeout: 10s
+
+  # ── cAdvisor : métriques des conteneurs Docker (CPU, mémoire, réseau…) ───
+  # Hôte + conteneurs, via le socket Docker monté par le compose monitoring.
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # ── node-exporter : métriques de la machine hôte (charge, RAM, disque…) ──
+  # Monté en mode host par le compose monitoring, scrapé via le réseau.
+  - job_name: node-exporter
+    static_configs:
+      - targets: ['node-exporter:9100']

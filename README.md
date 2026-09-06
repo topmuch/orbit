@@ -104,6 +104,16 @@ docs/screenshots/     # captures QA
 Voir [`.env.example`](.env.example) — base de données, secrets d'auth, VAPID, micro-service IA,
 Ollama, secret du service de rappels.
 
+## 🚀 Déploiement production
+
+Stack serveur complète : `docker-compose.prod.yml` (Caddy + HTTPS automatique, SQLite,
+IA Ollama, rappels, sauvegardes), `docker-compose.monitoring.yml` (Prometheus · Grafana · Loki),
+CI/CD GitHub Actions avec rollback automatique.
+
+→ **Guide pas-à-pas : [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** ·
+[Monitoring](docs/MONITORING.md) · [Sauvegardes](docs/BACKUP.md) ·
+[Dépannage](docs/TROUBLESHOOTING.md)
+
 ---
 
 <div align="center">

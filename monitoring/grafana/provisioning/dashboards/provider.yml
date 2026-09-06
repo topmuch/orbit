@@ -1,0 +1,30 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Provisionnement Grafana : fournisseur de dashboards
+# ─────────────────────────══──────────────────────────────────────────────────
+# Monté par docker-compose.monitoring.yml dans
+# /etc/grafana/provisioning/dashboards/ → Grafana scanne /var/lib/grafana/dashboards
+# (volume mappé sur ./monitoring/grafana/dashboards) et charge tous les
+# fichiers JSON trouvés — actuellement « orbit-overview.json ».
+# ═══════════════════════════════════════════════════════════════════════════
+
+apiVersion: 1
+
+providers:
+  - name: Orbit
+    orgId: 1
+    # Dashboards posés à la racine (pas de dossier dédié).
+    folder: ''
+    type: file
+    # Ne pas supprimer depuis l'UI (les dashboards sont gérés par Git) ;
+    # false = protégé contre la suppression accidentelle.
+    disableDeletion: false
+    # Re-scan du répertoire toutes les 30 s : déposer/modifier un JSON
+    # dans monitoring/grafana/dashboards le recharge sans redémarrer Grafana.
+    updateIntervalSeconds: 30
+    # Autoriser l'édition depuis l'UI (les modifications ne sont PAS
+    # persistées dans le fichier — restent locales au conteneur).
+    allowUiUpdates: true
+    options:
+      # Répertoire scanné dans le conteneur Grafana
+      # (volume : ./monitoring/grafana/dashboards → /var/lib/grafana/dashboards).
+      path: /var/lib/grafana/dashboards

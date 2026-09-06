@@ -1,0 +1,320 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — docker-compose de PRODUCTION
+# ───────────────────────────────────────────────────────────────────────────
+# Démarrage complet (build local + up) :
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+#
+# Variables d'environnement : ce fichier n'utilise PAS env_file: — toutes les
+# valeurs sont INTERPOLÉES depuis .env.production, passé par :
+#   • --env-file .env.production (commande ci-dessus), ou
+#   • le shell :  set -a; . ./.env.production; set +a
+# Les variables manquantes critiques font échouer la commande avec un message
+# explicite (syntaxe ${VAR:?…}) ; les autres ont une valeur par défaut.
+#
+# Contenu attendu de .env.production (copiez/adaptez depuis .env.example) :
+#   DOMAIN_NAME=orbit.exemple.fr            # domaine public (Caddy/ACME)
+#   ACME_EMAIL=admin@exemple.fr             # compte Let's Encrypt
+#   AUTH_SECRET=<openssl rand -hex 32>      # cookie de session HMAC
+#   VAPID_PUBLIC_KEY=…                      # bunx web-push generate-vapid-keys
+#   VAPID_PRIVATE_KEY=…
+#   VAPID_SUBJECT=mailto:contact@exemple.fr
+#   REMINDER_SERVICE_SECRET=<openssl rand -hex 24>
+#   # Optionnels : IMAGE_TAG, OLLAMA_MODEL, OLLAMA_MODELS,
+#   # REMINDER_INTERVAL_MS, AI_SERVICE_TIMEOUT_MS, AI_CACHE_TTL_MS,
+#   # METRICS_SECRET, BACKUP_INTERVAL_SECONDS, TZ
+#   # + monitoring : GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD
+#
+# ORDRE DE DÉMARRAGE (géré par depends_on, rien à faire à la main) :
+#   web-migrate (one-shot : prisma db push) ──▶ web ──▶ reminder, backup
+#   ollama (modèle prêt) ──▶ ai-api ; caddy démarre seul et termine le TLS.
+#   ⇒ web attend web-migrate: service_completed_successfully
+#   ⇒ reminder/backup attendent web: service_healthy (/api/health)
+#   ⇒ ai-api attend ollama: service_healthy (ollama list)
+#
+# PREMIER LANCEMENT :
+#   1. ollama télécharge le modèle (~4,9 Go — start_period 300 s, c'est normal
+#      que le healthcheck reste « starting » plusieurs minutes) ;
+#   2. caddy obtient le certificat ACME (DNS A → serveur, ports 80/443 ouverts) ;
+#   3. web-migrate crée le schéma SQLite dans le volume orbit_db ;
+#   4. créer un compte utilisateur via /api/auth/demo ou l'inscription.
+#
+# OÙ VIVENT LES DONNÉES (volumes nommés, `docker volume ls`) :
+#   orbit_db       base SQLite (/app/db/custom.db dans web)
+#   orbit_storage  pièces jointes emails (/app/storage dans web)
+#   orbit_backups  sauvegardes gzip (daily/ weekly/ monthly/)
+#   ollama_models  modèles LLM
+#   caddy_data/caddy_config  certificats + config ACME
+#
+# SAUVEGARDE MANUELLE : docker compose --env-file .env.production \
+#   -f docker-compose.prod.yml exec backup /backup.sh now
+#
+# MONITORING (Prometheus/Grafana/Loki…) : docker-compose.monitoring.yml —
+# démarrer la stack PROD D'ABORD (elle crée orbit_network), PUIS celle-là.
+#
+# GHCR (build-or-pull) : web/ai-api/reminder portent `build:` ET `image:`.
+#   • build+push : docker compose ... build web ai-api reminder && docker compose ... push
+#   • pull (CI/serveur sans sources) : docker compose ... pull web ai-api reminder
+#   • IMAGE_TAG épinglé pour les mises à production reproductibles.
+# ═══════════════════════════════════════════════════════════════════════════
+name: orbit-prod
+
+services:
+  # ── Reverse proxy / terminaison TLS ──────────────────────────────────────
+  # Caddy 2 : ACME automatique (Let's Encrypt), HTTP→HTTPS, HTTP/3.
+  # La config est docker/caddy/Caddyfile.prod (le .gitignore ignore tout
+  # fichier nommé exactement « Caddyfile » d'où le suffixe .prod).
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: orbit-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"        # challenge ACME HTTP-01 + redirection vers HTTPS
+      - "443:443"      # HTTPS (TCP)
+      - "443:443/udp"  # HTTP/3 (QUIC) — optionnel mais natif Caddy
+      - "127.0.0.1:2019:2019"  # API admin : uniquement depuis l'hôte (debug)
+    environment:
+      # Lus par le Caddyfile via {$DOMAIN_NAME} / {$ACME_EMAIL}
+      DOMAIN_NAME: "${DOMAIN_NAME:?DOMAIN_NAME manquant dans .env.production}"
+      ACME_EMAIL: "${ACME_EMAIL:?ACME_EMAIL manquant dans .env.production}"
+    volumes:
+      # :ro — Caddy ne modifie jamais sa config au runtime
+      - ./docker/caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # certificats ACME (précieux : à sauvegarder)
+      - caddy_config:/config   # certificats intermédiaires en cours d'obtention
+    networks:
+      - orbit_network
+    healthcheck:
+      # L'API admin de Caddy répond sur localhost:2019 (busybox wget).
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:2019/config/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ── Job de migration (one-shot) ──────────────────────────────────────────
+  # Cible `migrate` du Dockerfile racine : applique prisma/schema.prisma au
+  # volume orbit_db (bunx prisma db push — pas de dossier migrations/ dans
+  # ce projet). S'exécute AVANT web puis s'arrête (restart: "no").
+  web-migrate:
+    build:
+      context: .
+      target: migrate
+    container_name: orbit-web-migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: "file:/app/db/custom.db"
+    volumes:
+      - orbit_db:/app/db
+    networks:
+      - orbit_network
+
+  # ── Application web (Next.js 16, Bun, standalone) ────────────────────────
+  # Build local OU image GHCR pré-construite (pattern build-or-pull).
+  web:
+    build:
+      context: .
+      # cible par défaut = runner (multi-stage du Dockerfile racine)
+    image: ghcr.io/topmuch/orbit/web:${IMAGE_TAG:-latest}
+    container_name: orbit-web
+    restart: unless-stopped
+    depends_on:
+      # le schéma doit être appliqué avant l'ouverture du serveur
+      web-migrate:
+        condition: service_completed_successfully
+    environment:
+      # Auth cookie HMAC maison (PAS de NextAuth) — secret obligatoire
+      AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET manquant dans .env.production}"
+      # SQLite via Prisma — fichier dans le volume orbit_db
+      DATABASE_URL: "file:/app/db/custom.db"
+      # URL publique vue par le NAVIGATEUR (web-push VAPID, liens des
+      # notifications…) : le domaine servi par Caddy, PAS l'adresse interne.
+      APP_URL: "https://${DOMAIN_NAME:?DOMAIN_NAME manquant dans .env.production}"
+      # Web Push (VAPID) — servis par des API serveur, injectés au runtime
+      VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY:?VAPID_PUBLIC_KEY manquant dans .env.production}"
+      VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY:?VAPID_PRIVATE_KEY manquant dans .env.production}"
+      VAPID_SUBJECT: "${VAPID_SUBJECT:?VAPID_SUBJECT manquant dans .env.production}"
+      # Micro-service IA (nom de service sur orbit_network)
+      AI_SERVICE_URL: "http://ai-api:3031"
+      AI_SERVICE_TIMEOUT_MS: "${AI_SERVICE_TIMEOUT_MS:-120000}"
+      # Secret partagé avec le reminder-service (POST /api/notify)
+      REMINDER_SERVICE_SECRET: "${REMINDER_SERVICE_SECRET:?REMINDER_SERVICE_SECRET manquant dans .env.production}"
+      # Interrogé par le web (/api/health) pour surveiller ce service ;
+      # mettre une valeur vide côté web = cron externe à la place du conteneur
+      REMINDER_SERVICE_URL: "http://reminder:3032"
+      REMINDER_INTERVAL_MS: "${REMINDER_INTERVAL_MS:-60000}"
+      # Métriques Prometheus (/api/metrics) — optionnel
+      METRICS_SECRET: "${METRICS_SECRET:-}"
+    volumes:
+      - orbit_db:/app/db          # base SQLite
+      - orbit_storage:/app/storage # pièces jointes emails (process.cwd()/storage/attachments)
+    networks:
+      - orbit_network
+    healthcheck:
+      # /api/health : base + services aval vérifiés par l'application
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+
+  # ── Micro-service IA (FastAPI, docker/ai-service EXISTANT) ───────────────
+  # Même contrat que le mini-service bun de dev : /health, /analyze-email,
+  # /suggest-priority, /summarize, /chat. Port conteneur 3031, non exposé à
+  # l'hôte (interne au réseau ; le web le proxifie via ses routes /api/ai/*).
+  ai-api:
+    build:
+      context: docker/ai-service
+    image: ghcr.io/topmuch/orbit/ai-service:${IMAGE_TAG:-latest}
+    container_name: orbit-ai-api
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy # attendre que le modèle soit chargé
+    environment:
+      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.1:8b}"
+      OLLAMA_TIMEOUT_MS: "${OLLAMA_TIMEOUT_MS:-90000}"
+      AI_CACHE_TTL_MS: "${AI_CACHE_TTL_MS:-600000}"
+    networks:
+      - orbit_network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:3031/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
+  # ── Moteur d'inférence local (image docker/ollama EXISTANTE) ─────────────
+  # L'entrypoint pré-télécharge OLLAMA_MODELS puis suit le serveur. Les
+  # modèles persistent dans le volume ollama_models (jamais re-téléchargés).
+  ollama:
+    build:
+      context: docker/ollama
+    container_name: orbit-ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.1:8b}"
+      OLLAMA_MODELS: "${OLLAMA_MODELS:-llama3.1:8b}"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - orbit_network
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q \"${OLLAMA_MODEL:-llama3.1:8b}\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s # marge pour le téléchargement initial (~4,9 Go)
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 16g
+      # GPU NVIDIA (décommenter : ~10x plus rapide). ATTENTION : fusionner
+      # avec le bloc deploy.resources CI-DESSUS (mêmes clefs) :
+      #   reservations:
+      #     devices:
+      #       - driver: nvidia
+      #         count: 1
+      #         capabilities: [gpu]
+      # (et installer nvidia-container-toolkit sur l'hôte)
+
+  # ── Planificateur de rappels (mini-services/reminder-service, Bun pur) ───
+  # Boucle REMINDER_INTERVAL_MS → POST ${APP_URL}/api/notify avec le secret
+  # partagé (scan rappels + sync IMAP des comptes dus). En interne il appelle
+  # http://web:3000 (pas le domaine public). Remplaçable par un cron externe :
+  # laisser REMINDER_SERVICE_URL vide côté web et retirer ce service.
+  reminder:
+    build:
+      context: mini-services/reminder-service
+    image: ghcr.io/topmuch/orbit/reminder:${IMAGE_TAG:-latest}
+    container_name: orbit-reminder
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy # il interroge /api/notify du web
+    environment:
+      APP_URL: "http://web:3000"
+      REMINDER_SERVICE_SECRET: "${REMINDER_SERVICE_SECRET:?REMINDER_SERVICE_SECRET manquant dans .env.production}"
+      REMINDER_INTERVAL_MS: "${REMINDER_INTERVAL_MS:-60000}"
+    networks:
+      - orbit_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3032/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  # ── Sauvegardes (docker/backup : snapshot sqlite3 .backup + tar PJ) ───────
+  # Volumes montés en lecture seule : ce conteneur ne peut jamais corrompre
+  # la base ou les fichiers sources. Rétention 7 j / 4 sem / 6 mois.
+  backup:
+    build:
+      context: docker/backup
+    container_name: orbit-backup
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy # la base doit exister avant le 1er backup
+    environment:
+      BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-86400}"
+      TZ: "${TZ:-Europe/Paris}"
+    volumes:
+      - orbit_db:/data:ro        # base SQLite (lecture seule)
+      - orbit_storage:/storage:ro # pièces jointes emails (lecture seule)
+      - orbit_backups:/backups    # destination des archives (écriture)
+    networks:
+      - orbit_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+# ── Réseau partagé avec la stack monitoring ─────────────────────────────────
+# `name: orbit_network` explicite : docker-compose.monitoring.yml y fait
+# référence en `external: true` (une seule déclaration propriétaire).
+networks:
+  orbit_network:
+    name: orbit_network
+    driver: bridge
+
+# ── Volumes nommés (noms EXPLICITES, sans préfixe de projet) ─────────────────
+# Sauvegarde/inspection facilitées : docker volume inspect orbit_db …
+volumes:
+  orbit_db:
+    name: orbit_db
+    # Base SQLite de l'application (le seul état irremplaçable avec
+    # orbit_storage : à inclure dans les sauvegardes hors-serveur).
+  orbit_storage:
+    name: orbit_storage
+    # Pièces jointes des emails (binaire).
+  orbit_backups:
+    name: orbit_backups
+    # Archives daily/ weekly/ monthly/ produites par le service backup.
+  ollama_models:
+    name: ollama_models
+    # Modèles LLM (~4,9 Go pour llama3.1:8b).
+  caddy_data:
+    name: caddy_data
+    # Certificats ACME + clés (perdus = redemande un certificat, pas grave
+    # mais rate-limited Let's Encrypt → à préserver autant que possible).
+  caddy_config:
+    name: caddy_config
+    # État transitoire d'ACME.

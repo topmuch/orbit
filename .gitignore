@@ -30,10 +30,11 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (secrets never committed — template is)
+# env files (secrets never committed — templates are)
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # database (SQLite, contains user data)
 db/

@@ -1,0 +1,66 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Promtail : collecte des logs des conteneurs Docker → Loki
+# ───────────────────────────────────────────────────────────────────────────
+# Découverte dynamique des conteneurs via le socket Docker (docker_sd),
+# y compris ceux des AUTRES compose (prod, monitoring) : le socket voit
+# tous les conteneurs du démon, quel que soit le fichier compose d'origine.
+# Requis : /var/run/docker.sock monté en lecture seule (compose 19-a).
+# ═══════════════════════════════════════════════════════════════════════════
+
+server:
+  http_listen_port: 9080
+  # gRPC désactivé (pas nécessaire en mode scrape simple).
+  grpc_listen_port: 0
+
+positions:
+  # Reprise après redémarrage : mémorise l'offset de lecture de chaque flux.
+  filename: /tmp/positions.yaml
+
+clients:
+  # Envoi vers Loki (résolu via le réseau Docker orbit_network).
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # ── Tous les conteneurs du démon Docker ────────────────────────────────
+  # Pas de scrape de /var/log : les logs applicatifs passent par la sortie
+  # standard des conteneurs, découverte automatiquement ici.
+  - job_name: docker
+    docker_sd_configs:
+      # Socket du démon Docker monté dans le conteneur promtail.
+      - host: unix:///var/run/docker.sock
+        # Re-découverte des conteneurs toutes les 5 s
+        # (start/stop/recreate détectés rapidement).
+        refresh_interval: 5s
+
+    # ── Relabel : nom du conteneur + flux stdout/stderr en labels Loki ────
+    relabel_configs:
+      # __meta_docker_container_name vaut "/orbit-web" (slash initial) :
+      # on le retire → label « container » = "orbit-web".
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container'
+      # stdout / stderr → label « stream » (permet de filtrer les erreurs).
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: 'stream'
+
+    # ── Pipeline : les logs Docker sont au format JSON ────────────────────
+    # {"log":"...","stream":"stdout","time":"2024-09-06T12:34:56.789012345Z"}
+    pipeline_stages:
+      - json:
+          expressions:
+            # Champs standards du driver json de Docker.
+            time: time
+            log: log
+            stream: stream
+      - timestamp:
+          # Utiliser l'horodatage DU LOG (et non l'heure de collecte) :
+          # RFC3339Nano parse aussi les timestamps sans fraction — c'est le
+          # format des timestamps Docker (avec nanosecondes).
+          source: time
+          format: RFC3339Nano
+      - labels:
+          # Le flux extrait du JSON renforce/confirme le label « stream ».
+          stream:
+      - output:
+          # N'envoyer que le message (champ « log ») plutôt que le JSON brut.
+          source: log

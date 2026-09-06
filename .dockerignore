@@ -1,0 +1,71 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — .dockerignore (contexte de build de l'image web, Dockerfile racine)
+# ───────────────────────────────────────────────────────────────────────────
+# Objectif : n'envoyer au builder QUE ce dont `bunx next build` a besoin.
+# Bénéfices : contexte léger (build rapide), image minimale, et SURTOUT
+# aucune donnée utilisateur ni aucun secret ne peut finir dans une couche
+# d'image (db/, storage/, .env* exclus ci-dessous).
+#
+# Ce qui reste volontairement INCLUS : src/, public/, prisma/,
+# package.json, bun.lock, next.config.ts, tailwind.config.ts,
+# tsconfig*.json, components.json, postcss.config.mjs, eslint.config.mjs,
+# next-env.d.ts (régénéré par next build), README.md.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Dépendances et artefacts de build (recréés dans l'image) ──────────────
+node_modules
+.next
+out
+tsconfig.tsbuildinfo
+
+# ── DONNÉES UTILISATEUR (jamais dans une image !) ─────────────────────────
+db
+storage
+*.db
+db*.db
+
+# ── Secrets / environnements ───────────────────────────────────────────────
+# Le build n'a besoin d'AUCUN secret : aucune variable NEXT_PUBLIC_* dans le
+# code (la clé VAPID publique est servie par une API serveur au runtime).
+.env
+.env.*
+.env.production
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+dev.log
+server.log
+
+# ── Dossiers hors périmètre du build web ───────────────────────────────────
+# (le reminder-service a son PROPRE Dockerfile/.dockerignore dans
+#  mini-services/reminder-service/ ; l'IA et Ollama vivent dans docker/)
+tests/
+skills/
+scripts/
+docs/
+monitoring/
+docker/
+.github/
+mini-services/
+agent-ctx/
+tool-results/
+upload/
+examples/
+download/
+screenshots/
+
+# ── Git, compose et artefacts sandbox ─────────────────────────────────────
+.git
+.gitignore
+docker-compose.yml
+docker-compose.prod.yml
+docker-compose.monitoring.yml
+worklog.md
+.z*
+.claude
+.z-ai-config
+.DS_Store
+*.pem
+*.pid
+__pycache__/
+*.pyc

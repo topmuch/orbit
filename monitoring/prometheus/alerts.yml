@@ -1,0 +1,87 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Orbit — Règles d'alerte Prometheus (groupe « orbit-alerts »)
+# ───────────────────────────────────────────────────────────────────────────
+# Chargé par prometheus.yml → rule_files: /etc/prometheus/alerts.yml.
+# Annotations en français avec les commandes d'investigation réelles
+# (docker compose -f docker-compose.prod.yml … / -f docker-compose.monitoring.yml …).
+# ═══════════════════════════════════════════════════════════════════════════
+
+groups:
+  - name: orbit-alerts
+    rules:
+      # ── L'application Orbit ne répond plus ───────────────────────────────
+      - alert: OrbitAppDown
+        expr: orbit_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Orbit est DOWN — l'application ne répond plus"
+          description: "La métrique orbit_up vaut 0 depuis 2 minutes : l'endpoint /api/metrics du conteneur web ne répond pas (ou l'app crash-loop)."
+          runbook: "Investiguer : docker compose -f docker-compose.prod.yml ps web && docker compose -f docker-compose.prod.yml logs --tail=100 web ; puis docker compose -f docker-compose.monitoring.yml logs --tail=50 prometheus pour vérifier que le scrape fonctionne."
+
+      # ── La base de données (vue par l'app) est indisponible ──────────────
+      - alert: OrbitDatabaseDown
+        expr: orbit_db_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Base de données Orbit DOWN"
+          description: "orbit_db_up vaut 0 depuis 1 minute : l'application n'arrive plus à joindre sa base (PostgreSQL en production). Toutes les requêtes vont échouer."
+          runbook: "Investiguer : docker compose -f docker-compose.prod.yml logs --tail=100 web (erreurs Prisma/connexion) ; vérifier le conteneur de base de données (docker compose -f docker-compose.prod.yml ps) et DATABASE_URL ; vérifier la latence : curl http://web:3000/api/health."
+
+      # ── Le service IA (FastAPI + Ollama) est indisponible ────────────────
+      - alert: OrbitAIServiceDown
+        expr: orbit_ai_service_up == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Service IA Orbit indisponible depuis 10 min"
+          description: "orbit_ai_service_up vaut 0 depuis 10 minutes. Délai volontairement long : Ollama peut redémarrer ou recharger son modèle (chargement de llama3.1:8b de plusieurs minutes au premier démarrage) sans que ce soit une panne."
+          runbook: "Investiguer : docker compose -f docker-compose.prod.yml logs --tail=100 ai-api ; docker compose -f docker-compose.prod.yml logs --tail=100 ollama ; docker compose -f docker-compose.prod.yml ps ai-api ollama."
+
+      # ── Le service de rappels (reminders/push/emails) est indisponible ────
+      - alert: OrbitReminderDown
+        expr: orbit_reminder_service_up == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Service de rappels Orbit indisponible depuis 10 min"
+          description: "orbit_reminder_service_up vaut 0 depuis 10 minutes : le cycle de rappels (notifications push, syncs IMAP, envois programmés) ne tourne plus — les notifications ne partent plus."
+          runbook: "Investiguer : docker compose -f docker-compose.prod.yml logs --tail=100 web (le reminder-service journalise son cycle) ; vérifier /api/health : curl http://web:3000/api/health ; les notifications programmées seront rattrapées au redémarrage."
+
+      # ── node-exporter (donc probablement l'hôte) est injoignable ─────────
+      - alert: InstanceDown
+        expr: up{job="node-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "node-exporter injoignable — hôte ou exporter DOWN"
+          description: "Le scrape de node-exporter échoue depuis 2 minutes : soit l'hôte est en difficulté, soit l'exporter (ou le réseau Docker orbit_network) est défaillant."
+          runbook: "Investiguer : docker compose -f docker-compose.monitoring.yml ps node-exporter ; docker compose -f docker-compose.monitoring.yml logs --tail=100 node-exporter ; docker compose -f docker-compose.monitoring.yml logs --tail=50 prometheus ; si tout est DOWN, se connecter à l'hôte et vérifier systemctl status docker."
+
+      # ── Disque racine presque plein (< 10 % libres) ──────────────────────
+      - alert: HostDiskAlmostFull
+        expr: '(node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.10'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disque racine de l'hôte presque plein (< 10 % libres)"
+          description: "Moins de 10 % d'espace libre sur / depuis 10 minutes. Risque : SQLite/Postgres, volumes Docker (modèles Ollama ~5 Go, chunks Loki, attachments) et écritures de logs vont échouer."
+          runbook: "Investigater : ssh hôte puis df -h / ; docker system df ; nettoyer : docker system prune -f (images pendantes), journaux : journalctl --vacuum-time=7d ; vérifier la taille des volumes : docker volume ls puis du -sh /var/lib/docker/volumes/* ; Loki : vérifier la rétention 14 j dans monitoring/loki/loki.yml."
+
+      # ── Mémoire hôte saturée (> 95 % utilisée) ───────────────────────────
+      - alert: HostMemoryHigh
+        expr: '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.95'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mémoire hôte saturée (> 95 % utilisée)"
+          description: "Plus de 95 % de la RAM est utilisée depuis 5 minutes. Risque d'OOM-killer sur Ollama (grand consommateur) ou sur les conteneurs Orbit — l'IA et l'app peuvent tomber."
+          runbook: "Investiguer : ssh hôte puis free -h ; docker stats --no-stream (identifier le conteneur gourmand — souvent ollama) ; docker compose -f docker-compose.prod.yml ps (restarted ?) ; vérifier le swap : swapon --show ; dmesg | grep -i oom pour les kills récents."
