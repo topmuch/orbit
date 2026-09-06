@@ -1,9 +1,11 @@
-/* Orbit — Service Worker v4
+/* Orbit — Service Worker v5
    ─────────────────────────────────────────────────────────────────────────
-   Trois rôles :
+   Quatre rôles :
    1. OFFLINE COMPLET (Task 7) :
       • Lectures /api (GET) : network-first puis CACHE de secours (données
-        consultables hors ligne, marquées X-Orbit-Offline: 1) ;
+        consultables hors ligne, marquées X-Orbit-Offline: 1) ; entrées
+        horodatées (X-Orbit-Cached-At) et purgées au-delà de 7 jours (TTL) +
+        LRU (100 plus récentes conservées) ;
       • Navigations : réseau d'abord, page « / » en cache (prod) sinon
         offline.html — JAMAIS de bundle /_next/ mis en cache en dev
         (bug 13-b : chunks non hashés → bundle gelé) ;
@@ -16,18 +18,26 @@
       postMessage vers l'app ouverte (navigation SPA sans rechargement),
       « terminer une tâche » directement depuis la notification, et
       marquage « lu » de l'historique à la fermeture.
-   3. MISE À JOUR : skipWaiting sur message (pwa-register) + purge des
-      caches obsolètes à l'activation (orbit-v3 et moins).
+   3. BACKGROUND SYNC (v5, offline-first) : le tag « orbit-sync » est
+      programmé à chaque mise en file (lib/offline/queue-manager) ; le
+      navigateur déclenche l'événement quand le réseau revient (même app
+      en arrière-plan) → message SYNC_REQUESTED → la page lance push+pull.
+   4. MISE À JOUR : skipWaiting sur message (pwa-register) + purge des
+      caches obsolètes à l'activation (v4 et moins).
 
    Les MUTATIONS hors ligne ne passent PAS par le SW : elles sont mises en
-   file IndexedDB par la page (lib/offline-queue) et rejouées à la
+   file IndexedDB (Dexie) par la page (lib/offline) et rejouées à la
    reconnexion — cf. docs/offline-guide.md.
    ───────────────────────────────────────────────────────────────────────── */
 
-const CACHE = "orbit-v4";
-const API_CACHE = "orbit-api-v4";
+const CACHE = "orbit-v5";
+const API_CACHE = "orbit-api-v5";
 const IS_DEV =
   location.hostname === "localhost" || location.hostname === "127.0.0.1";
+/** TTL des entrées du cache API (7 jours — au-delà : purge). */
+const API_TTL_MS = 7 * 86_400_000;
+/** LRU : nombre d'entrées API conservées après purge. */
+const API_LRU_KEEP = 100;
 
 const PRECACHE = [
   "/",
@@ -49,6 +59,7 @@ const API_EXCLUDE = [
   "/api/export",
   "/api/events/export",
   "/api/email/accounts/test",
+  "/api/sync/", // pull delta : TOUJOURS fraîcheur réseau (jamais servie du cache)
 ];
 
 self.addEventListener("install", (event) => {
@@ -83,14 +94,48 @@ self.addEventListener("activate", (event) => {
 
 /* ══════════════════ Cache/PWA + Offline (Task 7) ══════════════════ */
 
-/** Limite le cache API (LRU approximatif : on garde les 100 plus récents). */
+/**
+ * Garde-fou du cache API : LRU approximatif (100 plus récents conservés)
+ * + TTL (entrées > 7 j purgées via l'en-tête X-Orbit-Cached-At posée à
+ * l'écriture — jamais sur les réponses servies au client).
+ */
 async function trimApiCache(cache) {
   const keys = await cache.keys();
+  // LRU : au-delà de 150 entrées, on ne garde que les 100 plus récentes
   if (keys.length > 150) {
-    for (const key of keys.slice(0, keys.length - 100)) {
+    for (const key of keys.slice(0, keys.length - API_LRU_KEEP)) {
       await cache.delete(key).catch(() => {});
     }
   }
+  // TTL : purge des entrées expirées (best-effort, jamais bloquant)
+  try {
+    const now = Date.now();
+    for (const key of await cache.keys()) {
+      const cached = await cache.match(key, { ignoreVary: true });
+      const cachedAt = Number(cached && cached.headers.get("X-Orbit-Cached-At"));
+      if (cachedAt && now - cachedAt > API_TTL_MS) {
+        await cache.delete(key).catch(() => {});
+      }
+    }
+  } catch {}
+}
+
+/** Met en cache une réponse API en horodatant l'entrée (TTL). */
+async function cacheApiResponse(cache, req, res) {
+  try {
+    const copy = res.clone();
+    const headers = new Headers(copy.headers);
+    headers.set("X-Orbit-Cached-At", String(Date.now()));
+    await cache.put(
+      req,
+      new Response(copy.body, {
+        status: copy.status,
+        statusText: copy.statusText || "OK",
+        headers,
+      })
+    );
+    await trimApiCache(cache);
+  } catch {}
 }
 
 function isApiExcluded(pathname) {
@@ -140,13 +185,10 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(req)
         .then(async (res) => {
-          // Cache des réponses valides sans cookie de session
+          // Cache des réponses valides sans cookie de session (horodatées TTL)
           if (res.ok && res.status === 200 && !res.headers.get("set-cookie")) {
             const cache = await caches.open(API_CACHE);
-            cache
-              .put(req, res.clone())
-              .then(() => trimApiCache(cache))
-              .catch(() => {});
+            cacheApiResponse(cache, req, res).catch(() => {});
           }
           return res;
         })
@@ -344,7 +386,49 @@ self.addEventListener("notificationclose", (event) => {
   );
 });
 
-/* Message depuis la page (ex. « skipWaiting » après mise à jour) */
+/* ══════════════════ Background Sync (v5, offline-first) ══════════════════
+   Le tag « orbit-sync » est enregistré par la page à chaque mise en file
+   d'une mutation (lib/offline/queue-manager). Quand le navigateur estime le
+   réseau revenu, il réveille le SW → on notifie TOUTES les pages ouvertes
+   (message SYNC_REQUESTED) → push de l'outbox + pull delta immédiats.
+   Sans page ouverte : le replay au montage + la sync initiale rattrapent. */
+self.addEventListener("sync", (event) => {
+  if (event.tag !== "orbit-sync") return;
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clients) => {
+        for (const client of clients) {
+          if ("postMessage" in client) {
+            client.postMessage({ type: "SYNC_REQUESTED", tag: "orbit-sync" });
+          }
+        }
+      })
+      .catch(() => {})
+  );
+});
+
+/* Message depuis la page :
+   • "skipWaiting" / { type: "SKIP_WAITING" } → activation immédiate (maj SW) ;
+   • { type: "CLEAR_CACHES" } → purge Cache Storage (outils réglages) ;
+   • { type: "GET_VERSION" } → réponse { type: "VERSION", version } (QA). */
 self.addEventListener("message", (event) => {
-  if (event.data === "skipWaiting") self.skipWaiting();
+  const data = event.data;
+  if (data === "skipWaiting" || (data && data.type === "SKIP_WAITING")) {
+    self.skipWaiting();
+    return;
+  }
+  if (data && data.type === "CLEAR_CACHES") {
+    const purge = caches
+      .keys()
+      .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+      .catch(() => {});
+    if (event.waitUntil) event.waitUntil(purge);
+    return;
+  }
+  if (data && data.type === "GET_VERSION") {
+    if (event.source && "postMessage" in event.source) {
+      event.source.postMessage({ type: "VERSION", version: CACHE, apiCache: API_CACHE });
+    }
+  }
 });

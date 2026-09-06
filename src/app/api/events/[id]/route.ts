@@ -18,6 +18,7 @@ import { toEventDto } from "@/lib/dto"
 import { eventUpdateSchema } from "@/lib/validators"
 import { computeConflicts, sanitizeText, appendException, isOccurrenceOfSeries, toJsonInput } from "@/lib/events-service"
 import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import { recordTombstone } from "@/lib/sync-tombstones"
 import type { Event } from "@prisma/client"
 
 type Params = { params: Promise<{ id: string }> }
@@ -214,5 +215,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
 
   // ── Suppression de l'événement / de la série entière ───────────────────────
   await db.event.delete({ where: { id: existing.id } })
+  // Tombstone : propagation de la suppression aux caches offline (multi-appareils)
+  await recordTombstone(user.id, "event", existing.id)
   return NextResponse.json({ ok: true })
 }

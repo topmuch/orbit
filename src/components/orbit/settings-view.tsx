@@ -37,6 +37,7 @@ import { useOfflineQueueStore } from "@/lib/offline-queue"
 import { promptInstall } from "@/components/orbit/pwa-register"
 import { DesignSystemShowcase } from "@/components/orbit/design-system-showcase"
 import { EmailAccountsCard } from "@/components/orbit/email-accounts-card"
+import { OfflineSyncCard } from "@/components/offline/OfflineSyncCard"
 import type { SessionUser } from "@/lib/types"
 import type { NotificationPreferenceDto } from "@/lib/types"
 import {
@@ -378,6 +379,9 @@ export function SettingsView({ user }: { user: SessionUser }) {
             </p>
           </CardContent>
         </Card>
+
+        {/* ---------- Synchronisation hors ligne (offline-first v2) ---------- */}
+        <OfflineSyncCard />
 
         {/* ---------- IA & confidentialité ---------- */}
         <Card className="border-border/60 bg-card/70 backdrop-blur-sm lg:col-span-2">

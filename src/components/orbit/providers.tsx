@@ -29,7 +29,21 @@ export function Providers({ children }: { children: React.ReactNode }) {
       queryClient.invalidateQueries()
     };
     window.addEventListener("orbit:data-synced", onSynced);
-    return () => window.removeEventListener("orbit:data-synced", onSynced);
+
+    // Offline-first v2 : le moteur de sync a PULLÉ des changements (autre
+    // appareil, service de rappels, sync IMAP…) → rafraîchissement des vues.
+    const onPullCompleted = (event: Event) => {
+      const detail = (event as CustomEvent<{ pulled?: number }>).detail;
+      if (detail && typeof detail.pulled === "number" && detail.pulled > 0) {
+        queryClient.invalidateQueries();
+      }
+    };
+    window.addEventListener("orbit:sync-completed", onPullCompleted);
+
+    return () => {
+      window.removeEventListener("orbit:data-synced", onSynced);
+      window.removeEventListener("orbit:sync-completed", onPullCompleted);
+    };
   }, [queryClient]);
 
   return (

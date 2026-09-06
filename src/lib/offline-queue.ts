@@ -1,26 +1,33 @@
 "use client";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Orbit — File d'attente des mutations hors ligne (Task 7) — usage client
+// Orbit — File d'attente des mutations hors ligne (Task 7 → v2 Dexie)
 // ───────────────────────────────────────────────────────────────────────────
 // Quand la connexion tombe, les actions d'écriture (créer/éditer/déplacer
-// une tâche, marquer un email lu…) sont stockées dans IndexedDB (outbox) et
-// rejouées DANS L'ORDRE dès le retour du réseau :
-//   • déclencheurs : événement « online », montage de l'app, garde 60 s ;
+// une tâche, marquer un email lu…) sont stockées dans l'outbox Dexie
+// (pendingOperations — entity/entityId/type/retryCount) avec application
+// OPTIMISTE dans le cache local, puis rejouées DANS L'ORDRE à la reconnexion :
+//   • déclencheurs : événement « online », montage, Background Sync (SW),
+//     moteur de sync (30 s), garde 60 s ;
 //   • chaque élément rejoué avec les cookies de session (same-origin) ;
-//   • 4xx → l'action est abandonnée (état serveur divergent) et signalée ;
-//   • 5xx / réseau → l'élément RESTE en file (nouvelle tentative plus tard) ;
-//   • après un replay réussi, un événement « orbit:data-synced » est émis →
-//     React Query invalide TOUTES les requêtes (données rafraîchies).
+//   • 4xx applicatif (409, 422…) → action abandonnée (état serveur divergent)
+//     et entité locale marquée « conflict » ; 401/403 → l'action RESTE en file
+//     (la session peut revenir) ;
+//   • 5xx / réseau → retryCount++ (abandon après maxRetries=5) ;
+//   • après un replay réussi : le cliché serveur remplace l'optimiste, un
+//     événement « orbit:data-synced » est émis → React Query rafraîchit TOUT
+//     et le moteur de sync tire le delta (tombstones comprises).
 //
-// Les lectures hors ligne sont gérées par le Service Worker v4 (cache des
-// GET /api, network-first) — cf. public/sw.js.
+// Les lectures hors ligne : cache structuré Dexie (hooks useOffline*) + cache
+// SW des GET /api (network-first) — cf. public/sw.js et lib/offline/.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { create } from "zustand";
 import { toast } from "sonner";
+import { db, setSyncMeta, getSyncMeta, type PendingOperation } from "@/lib/offline/indexeddb";
+import { queueManager, deriveOperation, postPushApply, registerSyncTag } from "@/lib/offline/queue-manager";
 
-/** Élément mis en file (uniquement method+url+body — jamais de fichier). */
+/** Vue compatibilité d'une opération en file (outils de débogage). */
 export interface QueuedMutation {
   id: string;
   seq: number; // ordre FIFO global
@@ -55,87 +62,63 @@ export const useOfflineQueueStore = create<OfflineQueueState>((set) => ({
   setReplaying: (replaying) => set({ replaying }),
 }));
 
-// ── IndexedDB (aucune dépendance — IDB brut) ────────────────────────────────
+// ── Waiters (l'app offline reste « en cours » jusqu'au replay) ─────────────
 
-const DB_NAME = "orbit-offline";
-const STORE = "queue";
-const DB_VERSION = 1;
-
-let dbPromise: Promise<IDBDatabase> | null = null;
-
-function openDb(): Promise<IDBDatabase> {
-  if (typeof indexedDB === "undefined") return Promise.reject(new Error("IndexedDB indisponible"));
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains(STORE)) {
-          req.result.createObjectStore(STORE, { keyPath: "id" });
-        }
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => {
-        dbPromise = null;
-        reject(req.error ?? new Error("IndexedDB indisponible"));
-      };
-    });
-  }
-  return dbPromise;
-}
-
-function idbRequest<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest): Promise<T> {
-  return openDb().then(
-    (db) =>
-      new Promise<T>((resolve, reject) => {
-        const tx = db.transaction(STORE, mode);
-        const req = fn(tx.objectStore(STORE));
-        req.onsuccess = () => resolve(req.result as T);
-        req.onerror = () => reject(req.error);
-      })
-  );
-}
-
-// ── File d'attente ──────────────────────────────────────────────────────────
-
-/** Attente de l'api() en cours pendant que l'élément est en file. */
 type Waiter = { resolve: (outcome: QueueOutcome) => void; timer: ReturnType<typeof setTimeout> };
 const waiters = new Map<string, Waiter>();
 
 /** Anti-concurrence : un seul replay à la fois. */
 let replaying = false;
-let seqCounter = Date.now();
 
 /** Compteur réactif rafraîchi à chaque changement de file (public : PwaRegister). */
 export async function refreshCount(): Promise<void> {
-  const items = await getQueued().catch(() => [] as QueuedMutation[]);
-  useOfflineQueueStore.getState().setCount(items.length);
+  try {
+    const count = await queueManager.count();
+    useOfflineQueueStore.getState().setCount(count);
+  } catch {
+    // IndexedDB indisponible (mode privé…) — silencieux
+  }
 }
 
-/** Ajoute une mutation à la file (appelée par api() quand le réseau tombe). */
+/**
+ * Ajoute une mutation à la file : dérivation sémantique (entité/id/type),
+ * application OPTIMISTE locale, enregistrement, Background Sync programmé.
+ */
 export async function enqueueMutation(
   url: string,
   method: string,
   body: string | null,
   label: string
 ): Promise<QueuedMutation> {
-  const item: QueuedMutation = {
-    id: `q-${(++seqCounter).toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    seq: seqCounter,
-    url,
-    method: method.toUpperCase(),
-    body,
-    label,
-    createdAt: Date.now(),
-  };
-  await idbRequest("readwrite", (s) => s.put(item));
+  const op = await queueManager.enqueue(url, method, body, label);
   await refreshCount();
-  return item;
+  return {
+    id: op.id,
+    seq: op.seq,
+    url: op.data.url,
+    method: op.data.method,
+    body: op.data.body,
+    label: op.data.label,
+    createdAt: Date.parse(op.timestamp),
+  };
 }
 
-/** Contenu de la file, trié FIFO. */
+/** Contenu de la file (vue compatibilité), trié FIFO. */
 export async function getQueued(): Promise<QueuedMutation[]> {
-  const items = await idbRequest<QueuedMutation[]>("readonly", (s) => s.getAll());
-  return items.sort((a, b) => a.seq - b.seq);
+  try {
+    const ops = await queueManager.all();
+    return ops.map((op) => ({
+      id: op.id,
+      seq: op.seq,
+      url: op.data.url,
+      method: op.data.method,
+      body: op.data.body,
+      label: op.data.label,
+      createdAt: Date.parse(op.timestamp),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 /** Attend le résultat du replay de l'élément (l'app offline reste « en cours »). */
@@ -145,7 +128,11 @@ export function waitForOutcome(id: string, timeoutMs = 15 * 60_000): Promise<Que
       waiters.delete(id);
       // L'élément RESTE en file (il sera synchronisé plus tard, même app fermée
       // au retour : le replay au montage s'en charge) — seule l'UI renonce.
-      resolve({ ok: false, status: 0, error: "Hors ligne depuis trop longtemps — l'action sera synchronisée à la reconnexion." });
+      resolve({
+        ok: false,
+        status: 0,
+        error: "Hors ligne depuis trop longtemps — l'action sera synchronisée à la reconnexion.",
+      });
     }, timeoutMs);
     waiters.set(id, { resolve, timer });
   });
@@ -159,9 +146,46 @@ function settleWaiter(id: string, outcome: QueueOutcome): void {
   waiter.resolve(outcome);
 }
 
-/** 4xx (hors 408/429) = refus définitif du serveur → abandon, pas de retry. */
+/**
+ * 4xx APPLICATIF = refus définitif du serveur pour CETTE action → abandon.
+ * 401/403 : la session peut revenir (login) → on GARDE l'action en file.
+ * 408/429 : transitoire → retry.
+ */
 function isPermanentFailure(status: number): boolean {
-  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+  return (
+    status >= 400 &&
+    status < 500 &&
+    status !== 401 &&
+    status !== 403 &&
+    status !== 408 &&
+    status !== 429
+  );
+}
+
+/**
+ * 4xx définitif : l'état serveur a divergé (409 conflit, 404 disparue…).
+ * L'entité locale passe « conflict » (résolution manuelle dans les réglages),
+ * la création temporaire éventuelle est retirée du cache.
+ */
+async function markOpConflict(op: PendingOperation): Promise<void> {
+  try {
+    if (op.tempLocalId) {
+      if (op.entity === "task") await db.tasks.delete(op.tempLocalId);
+      else if (op.entity === "event") await db.events.delete(op.tempLocalId);
+      else if (op.entity === "email") await db.emails.delete(op.tempLocalId);
+    }
+    if (op.entityId && (op.entity === "task" || op.entity === "event" || op.entity === "email")) {
+      const changes = {
+        _syncStatus: "conflict" as const,
+        _serverUpdatedAt: new Date().toISOString(),
+      };
+      if (op.entity === "task") await db.tasks.update(op.entityId, changes);
+      else if (op.entity === "event") await db.events.update(op.entityId, changes);
+      else await db.emails.update(op.entityId, changes);
+    }
+  } catch {
+    // silencieux
+  }
 }
 
 /**
@@ -181,36 +205,60 @@ export async function replayQueue(opts: { silent?: boolean } = {}): Promise<{
   const result = { synced: 0, failed: 0, remaining: 0 };
 
   try {
-    const items = await getQueued();
+    const ops = await queueManager.all();
     const errors: string[] = [];
 
-    for (const item of items) {
+    for (const op of ops) {
       let outcome: QueueOutcome;
       try {
-        const res = await fetch(item.url, {
-          method: item.method,
-          headers: item.body !== null ? { "Content-Type": "application/json" } : undefined,
-          body: item.body,
+        const res = await fetch(op.data.url, {
+          method: op.data.method,
+          headers: op.data.body !== null ? { "Content-Type": "application/json" } : undefined,
+          body: op.data.body,
           credentials: "same-origin",
         });
         const data = await res.json().catch(() => null);
+
         if (res.ok) {
+          // Succès : le cliché serveur remplace l'optimiste (id temporaire
+          // supprimé), puis l'op quitte la file.
+          await postPushApply(op, data);
+          await queueManager.delete(op.id);
           outcome = { ok: true, status: res.status, data };
           result.synced++;
-        } else if (isPermanentFailure(res.status)) {
-          // 4xx : refus définitif pour CETTE action (état serveur divergent,
-          // ex. 409 conflit) — on l'abandonne et on CONTINUE la file.
-          outcome = {
-            ok: false,
-            status: res.status,
-            error: (data as { error?: string } | null)?.error ?? `Erreur ${res.status}`,
-          };
-          result.failed++;
-          errors.push(`« ${item.label} » refusée (${res.status})`);
-        } else {
-          // 5xx : le serveur est en difficulté → on garde TOUT le reste en file
-          outcome = { ok: false, status: res.status, error: `Erreur ${res.status}` };
+        } else if (res.status === 401 || res.status === 403) {
+          // Session absente : l'action RESTE en file (elle est peut-être
+          // légitime dès la reconnexion) — on stoppe le cycle.
+          outcome = { ok: false, status: res.status, error: "Session requise" };
           break;
+        } else if (isPermanentFailure(res.status)) {
+          // 4xx applicatif : refus définitif pour CETTE action — on
+          // l'abandonne et on CONTINUE la file.
+          const message =
+            (data as { error?: string } | null)?.error ?? `Erreur ${res.status}`;
+          await markOpConflict(op);
+          await queueManager.delete(op.id);
+          outcome = { ok: false, status: res.status, error: message };
+          result.failed++;
+          errors.push(`« ${op.data.label} » refusée (${res.status})`);
+        } else {
+          // 5xx / 408 / 429 : le serveur est en difficulté → retry compté,
+          // on garde TOUT le reste en file.
+          const retryCount = op.retryCount + 1;
+          if (retryCount >= op.maxRetries) {
+            await queueManager.delete(op.id);
+            outcome = {
+              ok: false,
+              status: res.status,
+              error: `Abandon après ${op.maxRetries} tentatives`,
+            };
+            result.failed++;
+            errors.push(`« ${op.data.label} » abandonnée après ${op.maxRetries} tentatives`);
+          } else {
+            await queueManager.update(op.id, { retryCount, error: `HTTP ${res.status}` });
+            outcome = { ok: false, status: res.status, error: `Erreur ${res.status}` };
+            break; // serveur instable → prochaine tentative plus tard
+          }
         }
       } catch {
         // réseau encore coupé → on garde le reste en file
@@ -218,15 +266,15 @@ export async function replayQueue(opts: { silent?: boolean } = {}): Promise<{
         break;
       }
 
-      await idbRequest("readwrite", (s) => s.delete(item.id));
-      settleWaiter(item.id, outcome);
+      settleWaiter(op.id, outcome);
     }
 
-    result.remaining = (await getQueued()).length;
+    result.remaining = await queueManager.count().catch(() => 0);
     useOfflineQueueStore.getState().setCount(result.remaining);
 
     if (result.synced > 0) {
-      // Données modifiées côté serveur → React Query rafraîchit tout
+      // Données modifiées côté serveur → React Query rafraîchit tout + le
+      // moteur de sync tire le delta (tombstones comprises).
       window.dispatchEvent(new CustomEvent("orbit:data-synced", { detail: result }));
     }
 
@@ -254,8 +302,65 @@ export async function replayQueue(opts: { silent?: boolean } = {}): Promise<{
 
 /** Purge totale (aucune donnée conservée) — utilitaire de débogage. */
 export async function clearQueue(): Promise<void> {
-  await idbRequest("readwrite", (s) => s.clear());
+  await queueManager.clear().catch(() => {});
   await refreshCount();
+}
+
+// ── Migration de la file historique (IndexedDB brut, Task 7) ────────────────
+
+/**
+ * Importe l'ancienne file « orbit-offline » (IDB brut) dans l'outbox Dexie,
+// puis purge l'ancien magasin. Idempotent (clé de métadonnée). Appelé une
+ * fois par PwaRegister au montage.
+ */
+export async function importLegacyQueue(): Promise<void> {
+  try {
+    const migrated = (await getSyncMeta("legacyQueueMigrated")) as boolean | undefined;
+    if (migrated) return;
+    await setSyncMeta("legacyQueueMigrated", true);
+
+    if (typeof indexedDB === "undefined") return;
+    interface LegacyItem {
+      url: string;
+      method: string;
+      body: string | null;
+      label: string;
+    }
+    const legacy = await new Promise<LegacyItem[]>((resolve) => {
+      const req = indexedDB.open("orbit-offline");
+      req.onsuccess = () => {
+        const database = req.result;
+        if (!database.objectStoreNames.contains("queue")) {
+          database.close();
+          resolve([]);
+          return;
+        }
+        const tx = database.transaction("queue", "readonly");
+        const getAll = tx.objectStore("queue").getAll();
+        getAll.onsuccess = () => resolve((getAll.result ?? []) as LegacyItem[]);
+        getAll.onerror = () => resolve([]);
+        tx.oncomplete = () => database.close();
+      };
+      req.onerror = () => resolve([]);
+    });
+
+    for (const item of legacy) {
+      if (item && typeof item.url === "string") {
+        await queueManager.enqueue(item.url, item.method ?? "POST", item.body ?? null, item.label ?? "Action");
+      }
+    }
+    if (legacy.length > 0) await refreshCount();
+
+    // Purge de l'ancien magasin (données désormais dans Dexie)
+    await new Promise<void>((resolve) => {
+      const req = indexedDB.deleteDatabase("orbit-offline");
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve();
+    });
+  } catch {
+    // silencieux — la migration est opportuniste
+  }
 }
 
 // ── Libellés FR pour les toasts ─────────────────────────────────────────────
@@ -285,5 +390,9 @@ if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
     replay: () => replayQueue({ silent: false }),
     clear: clearQueue,
     count: () => useOfflineQueueStore.getState().count,
+    ops: () => queueManager.all(),
   };
 }
+
+// Ré-export pour les intégrateurs historiques (api-client importe dynamiquement)
+export { deriveOperation, registerSyncTag };

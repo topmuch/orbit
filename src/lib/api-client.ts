@@ -7,6 +7,15 @@ import {
   useMutation,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useOnlineStatus } from "@/hooks/useOnlineStatus";
+import {
+  useOfflineTasks,
+  useOfflineEmails,
+  useOfflineEvents,
+  expandLocalEvents,
+} from "@/hooks/useOfflineData";
+import { isConnectionOffline } from "@/lib/network/connection-monitor";
+import type { LocalEmail } from "@/lib/offline/indexeddb";
 import type {
   SessionUser,
   EventDto,
@@ -100,6 +109,19 @@ async function enqueueAndAwait<T>(path: string, method: string, init?: RequestIn
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
+
+  // Simulation hors ligne (réglages/QA) : la mutation part directement en
+  // file SANS tenter le fetch (une vraie coupure est détectée par le
+  // TypeError ci-dessous — navigator.onLine ment trop souvent pour y croire).
+  if (
+    method !== "GET" &&
+    method !== "HEAD" &&
+    isConnectionOffline() &&
+    isOfflineQueueable(path, method)
+  ) {
+    return enqueueAndAwait<T>(path, method, init);
+  }
+
   let res: Response;
   try {
     res = await fetch(path, {
@@ -139,6 +161,11 @@ export function useAuthMutations() {
   const qc = useQueryClient()
   const done = () => {
     qc.invalidateQueries()
+    // Signal offline-first : le moteur de sync relance un pull immédiat
+    // (l'app démarre souvent sur l'écran de connexion → premier pull 401).
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("orbit:session-changed"))
+    }
   }
 
   const login = useMutation({
@@ -212,11 +239,15 @@ function minuteKey(d: Date): string {
   return new Date(Math.floor(d.getTime() / 60_000) * 60_000).toISOString()
 }
 
-/** Événements (occurrences expansées) d'une plage [start, end]. */
+/** Événements (occurrences expansées) d'une plage [start, end].
+ *  Hors ligne : masters du cache Dexie expansés localement (même moteur que
+ *  le serveur — lib/calendar) ; en ligne : React Query classique. */
 export function useEventsRange(start?: Date, end?: Date) {
   const isoStart = start ? minuteKey(start) : undefined
   const isoEnd = end ? minuteKey(end) : undefined
-  return useQuery<{ events: EventDto[] }>({
+  const online = useOnlineStatus()
+  const offlineMasters = useOfflineEvents()
+  const query = useQuery<{ events: EventDto[] }>({
     queryKey: ["events", "range", isoStart ?? "", isoEnd ?? ""],
     // La requête conserve les instants EXACTS (la clé seule est tronquée) :
     // un cache servi d'une minute à l'autre reste dans la tolérance des plages.
@@ -224,7 +255,14 @@ export function useEventsRange(start?: Date, end?: Date) {
     // Anti-burst : les remounts rapides servent le cache au lieu de refetcher
     // (les invalidations après mutations passent toujours).
     staleTime: 30_000,
+    enabled: online,
   })
+
+  if (!online) {
+    const events = expandLocalEvents(offlineMasters, start, end)
+    return { ...query, data: { events }, isLoading: false, isFetching: false }
+  }
+  return query
 }
 
 /** Alias legacy : useEvents(from, to) — même queryFn/queryKey que useEventsRange
@@ -360,12 +398,27 @@ export type TaskInput = TaskCreateInput
 /** Entrée de mise à jour (tableaux tags/subtasks = remplacement complet). */
 export type TaskPatchInput = TaskUpdateInput
 
-/** Tâches de l'utilisateur (volume personnel : tout, relations incluses). */
+/** Tâches de l'utilisateur (volume personnel : tout, relations incluses).
+ *  Hors ligne : cache Dexie (live query — mutations optimistes visibles). */
 export function useTasks() {
-  return useQuery<TaskListResult>({
+  const online = useOnlineStatus()
+  const offlineTasks = useOfflineTasks()
+  const query = useQuery<TaskListResult>({
     queryKey: ["tasks"],
     queryFn: () => api<TaskListResult>("/api/tasks"),
+    enabled: online,
   })
+
+  if (!online) {
+    const tasks = offlineTasks as unknown as TaskDto[]
+    return {
+      ...query,
+      data: { tasks, page: 1, limit: tasks.length, total: tasks.length },
+      isLoading: false,
+      isFetching: false,
+    }
+  }
+  return query
 }
 
 /** Statistiques du système de tâches (Kanban + semaine de complétions). */
@@ -582,28 +635,138 @@ function emailListUrl(filters: EmailListFilters): string {
 }
 
 /**
+ * Page d'emails calculée depuis le cache local (filtres dossiers/recherche/
+ * compte + compteurs + comptes dérivés — adresse comme pseudo-id hors ligne).
+ * Mêmes conventions que GET /api/emails (étoilés = suivi, hors corbeille).
+ */
+function computeOfflineEmailsPage(
+  local: LocalEmail[],
+  filters: EmailListFilters
+): EmailsPageDto {
+  const q = filters.q?.trim().toLowerCase() ?? ""
+
+  let list = local.filter((email) => {
+    if (filters.folder === "STARRED") {
+      if (!email.isStarred || email.folder === "TRASH") return false
+    } else if (filters.folder !== "ALL" && email.folder !== filters.folder) {
+      return false
+    }
+    if (filters.unread && email.isRead) return false
+    if (filters.starred && !email.isStarred) return false
+    if (q) {
+      const haystack =
+        `${email.subject} ${email.fromName ?? ""} ${email.fromAddress} ${email.snippet ?? ""} ${email.bodyText ?? ""}`.toLowerCase()
+      if (!haystack.includes(q)) return false
+    }
+    return true
+  })
+
+  // Compte : correspondance par ADRESSE hors ligne (pseudo-id dérivé)
+  if (filters.accountId) {
+    const matches = list.filter((email) => email.accountAddress === filters.accountId)
+    if (matches.length > 0) list = matches
+  }
+
+  list = [...list].sort((a, b) =>
+    filters.sort === "oldest"
+      ? Date.parse(a.receivedAt) - Date.parse(b.receivedAt)
+      : Date.parse(b.receivedAt) - Date.parse(a.receivedAt)
+  )
+
+  const counts = {
+    inbox: local.filter((e) => e.folder === "INBOX").length,
+    inboxUnread: local.filter((e) => e.folder === "INBOX" && !e.isRead).length,
+    starred: local.filter((e) => e.isStarred && e.folder !== "TRASH").length,
+    sent: local.filter((e) => e.folder === "SENT").length,
+    archive: local.filter((e) => e.folder === "ARCHIVE").length,
+    trash: local.filter((e) => e.folder === "TRASH").length,
+    unread: local.filter((e) => !e.isRead).length,
+    all: local.length,
+  }
+
+  const accountMap = new Map<
+    string,
+    { id: string; address: string; label: string | null; unread: number; canSend: boolean }
+  >()
+  for (const email of local) {
+    if (!email.accountAddress) continue
+    const existing = accountMap.get(email.accountAddress)
+    if (existing) {
+      if (!email.isRead) existing.unread++
+    } else {
+      accountMap.set(email.accountAddress, {
+        id: email.accountAddress,
+        address: email.accountAddress,
+        label: null,
+        unread: email.isRead ? 0 : 1,
+        canSend: false,
+      })
+    }
+  }
+
+  const limit = filters.limit ?? (filters.folder === "ALL" ? 60 : 25)
+  const page = filters.page ?? 1
+  const start = (page - 1) * limit
+
+  return {
+    emails: list.slice(start, start + limit) as unknown as EmailDto[],
+    total: list.length,
+    page,
+    limit,
+    counts,
+    accounts: [...accountMap.values()],
+  }
+}
+
+/**
  * Liste des emails (filtres dossiers/recherche/compte + compteurs + comptes).
  * SANS argument : vue globale (badge de navigation, centre de notifications).
- * Rafraîchissement 60 s ≈ quasi temps réel (sync serveur toutes les 60 s).
+ * Hors ligne : cache Dexie (live query — lectures/étoiles optimistes visibles).
+ * En ligne : rafraîchissement 60 s ≈ quasi temps réel (sync serveur 60 s).
  */
 export function useEmails(filters?: EmailListFilters) {
   const effective = filters ?? { folder: "ALL" as const }
-  return useQuery<EmailsPageDto>({
+  const online = useOnlineStatus()
+  const offlineEmails = useOfflineEmails()
+  const query = useQuery<EmailsPageDto>({
     queryKey: ["emails", JSON.stringify(effective)],
     queryFn: () => api<EmailsPageDto>(emailListUrl(effective)),
     refetchInterval: 60_000,
     placeholderData: (prev) => prev, // pagination sans flash
+    enabled: online,
   })
+
+  if (!online) {
+    return {
+      ...query,
+      data: computeOfflineEmailsPage(offlineEmails, effective),
+      isLoading: false,
+      isFetching: false,
+    }
+  }
+  return query
 }
 
-/** Détail complet d'un email (HTML nettoyé + pièces jointes + compte). */
+/** Détail complet d'un email (HTML nettoyé + pièces jointes + compte).
+ *  Hors ligne : enregistrement du cache Dexie (corps complet inclus — le
+ *  pull de sync stocke le format détail). */
 export function useEmailDetail(id: string | null) {
-  return useQuery<{ email: EmailDto }>({
+  const online = useOnlineStatus()
+  const offlineEmails = useOfflineEmails()
+  const query = useQuery<{ email: EmailDto }>({
     queryKey: ["email-detail", id],
     queryFn: () => api<{ email: EmailDto }>(`/api/emails/${id}`),
-    enabled: Boolean(id),
+    enabled: Boolean(id) && online,
     staleTime: 30_000,
   })
+
+  if (!online && id) {
+    const local = offlineEmails.find((email) => email.id === id)
+    if (local) {
+      return { ...query, data: { email: local as unknown as EmailDto }, isLoading: false, isFetching: false }
+    }
+  }
+  return query
 }
 
 /** PATCH unitaire (lu / étoilé / dossier / traité). */

@@ -339,6 +339,23 @@ model NotificationPreference {
   updatedAt DateTime @updatedAt
 }
 
+// ── Tombstones de synchronisation (offline-first, multi-appareils) ──────────
+// Quand une entité est SUPPRIMÉE côté serveur, la ligne disparait : un pull
+// delta ne peut pas la détecter. On enregistre donc une pierre tombale que
+// GET /api/sync/changes renvoie aux autres appareils (suppression locale de
+// leur cache IndexedDB). Purge auto > 30 j (fenêtre largement suffisante pour
+// un appareil hors ligne ; au-delà, la réhydratation complète rattrape).
+model SyncTombstone {
+  id        String   @id @default(cuid())
+  userId    String
+  entity    String   // "event" | "task" | "email"
+  entityId  String
+  deletedAt DateTime @default(now())
+
+  @@index([userId, deletedAt])
+  @@index([userId, entity])
+}
+
 // Historique des notifications envoyées (centre de notifications in-app).
 // SQLite : pas d'enum — type = chaîne validée côté Zod :
 // "EVENT_REMINDER" | "TASK_DEADLINE" | "IMPORTANT_EMAIL" | "AI_SUGGESTION" | "SYSTEM" | "CUSTOM"

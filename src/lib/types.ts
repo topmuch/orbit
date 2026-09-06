@@ -53,10 +53,14 @@ export type EventDto = {
   color: string | null
   source: EventSource
   recurrence: RecurrenceRule | null
+  /** Débuts ISO des occurrences annulées (exceptions de série) — expansion offline. */
+  recurrenceExceptions: string[] | null
   attendees: EventAttendee[] | null
   reminders: EventReminder[] | null
   externalId: string | null
   createdAt: string
+  /** Dernière modification serveur (ISO) — résolution de conflits offline. */
+  updatedAt: string
   /** true = occurrence expansée d'une série (non persistée en base). */
   isOccurrence: boolean
   /** Id du master quand isOccurrence (sinon null). */
@@ -245,6 +249,8 @@ export type EmailDto = {
   bodyHtml?: string | null
   receivedAt: string // ISO
   sentAt: string | null // ISO (emails envoyés depuis Orbit)
+  /** Dernière modification serveur (ISO) — résolution de conflits offline. */
+  updatedAt: string
   isRead: boolean
   isStarred: boolean
   isProcessed: boolean

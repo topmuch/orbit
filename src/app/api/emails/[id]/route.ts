@@ -16,6 +16,7 @@ import { getSessionUser } from "@/lib/auth"
 import { toEmailDto } from "@/lib/dto"
 import { emailPatchSchema } from "@/lib/validators"
 import { setEmailImapFlags } from "@/lib/imap"
+import { recordTombstone } from "@/lib/sync-tombstones"
 import { deleteEmailAttachments } from "@/lib/attachments"
 
 export const runtime = "nodejs"
@@ -124,6 +125,8 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   await db.emailLog.delete({ where: { id } })
   // Fichiers joints retirés du disque (métadonnées en cascade SQL)
   await deleteEmailAttachments(id)
+  // Tombstone : propagation de la suppression aux caches offline (multi-appareils)
+  await recordTombstone(user.id, "email", id)
 
   return NextResponse.json({ ok: true })
 }

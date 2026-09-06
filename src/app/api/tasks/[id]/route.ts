@@ -14,6 +14,7 @@ import { getSessionUser } from "@/lib/auth"
 import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { taskUpdateSchema } from "@/lib/validators"
 import { loadOwnedTask, updateTaskWithRelations, taskDto } from "@/lib/tasks-service"
+import { recordTombstone } from "@/lib/sync-tombstones"
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -75,6 +76,8 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   if (hard || existing.status === "archived") {
     // Suppression définitive : sous-tâches en cascade, tags détachés (m:n)
     await db.task.delete({ where: { id } })
+    // Tombstone : propagation de la suppression aux caches offline (multi-appareils)
+    await recordTombstone(user.id, "task", id)
     return NextResponse.json({ ok: true, mode: "deleted" })
   }
 

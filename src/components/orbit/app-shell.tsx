@@ -18,9 +18,10 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { OrbitLogo } from "@/components/orbit/logo"
 import { NotificationCenter } from "@/components/orbit/notifications-center"
+import { SyncStatusBadge } from "@/components/offline/SyncStatusBadge"
+import { OfflineBanner } from "@/components/offline/OfflineBanner"
 import { useEmails } from "@/lib/api-client"
 import { usePwaStore } from "@/lib/pwa-store"
-import { useOfflineQueueStore, replayQueue } from "@/lib/offline-queue"
 import { promptInstall } from "@/components/orbit/pwa-register"
 import type { OrbitView, SessionUser } from "@/lib/types"
 import {
@@ -31,9 +32,7 @@ import {
   Bot,
   Settings,
   LogOut,
-  WifiOff,
   Download,
-  CloudUpload,
 } from "lucide-react"
 
 const NAV: { view: OrbitView; label: string; icon: React.ElementType }[] = [
@@ -68,9 +67,7 @@ export function AppShell({
   children: React.ReactNode
 }) {
   const { data: emailsData } = useEmails()
-  const { online, canInstall, installed } = usePwaStore()
-  const queueCount = useOfflineQueueStore((s) => s.count)
-  const queueReplaying = useOfflineQueueStore((s) => s.replaying)
+  const { canInstall, installed } = usePwaStore()
 
   // Deep link depuis une notification OS : le Service Worker (v3) poste
   // { orbit: "navigate", view, … } quand l'utilisateur clique une notif
@@ -179,30 +176,9 @@ export function AppShell({
           </span>
 
           <div className="ml-auto flex items-center gap-1">
-            {/* File d'attente offline (Task 7) : mutations en attente de
-                reconnexion — clic = tentative de replay immédiate */}
-            {queueCount > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  void replayQueue()
-                }}
-                className="mr-1 inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-600 transition-colors hover:bg-amber-500/20 dark:text-amber-400"
-                aria-label={`${queueCount} action(s) hors ligne en attente de synchronisation — cliquer pour réessayer maintenant`}
-                title="Actions enregistrées hors ligne — envoyées dès la reconnexion"
-              >
-                <CloudUpload className={queueReplaying ? "size-3 animate-pulse" : "size-3"} aria-hidden />
-                <span className="tabular-nums">{queueCount}</span>
-                <span className="hidden sm:inline">en attente</span>
-              </button>
-            )}
-
-            {!online && (
-              <Badge variant="destructive" className="mr-1 gap-1.5">
-                <WifiOff className="size-3" aria-hidden />
-                <span className="hidden sm:inline">Hors ligne</span>
-              </Badge>
-            )}
+            {/* Statut de synchronisation offline-first v2 : hors ligne / sync /
+                N en attente (clic = sync) / conflits (clic = réglages) / âge */}
+            <SyncStatusBadge onOpenSettings={() => onNavigate("settings")} />
 
             {canInstall && !installed && (
               <Button
@@ -248,6 +224,9 @@ export function AppShell({
             </div>
           </div>
         </header>
+
+        {/* Bannière hors ligne (offline-first v2) : cache local + file d'attente */}
+        <OfflineBanner />
 
         {/* Main */}
         <main className="mx-auto w-full max-w-6xl flex-1 px-3 py-5 pb-28 sm:px-5 sm:py-6 lg:pb-10">
