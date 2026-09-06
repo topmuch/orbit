@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/orbit/providers";
+import { getRequestLocale } from "@/lib/i18n/request";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -46,17 +47,21 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Locale du cookie NEXT_LOCALE (i18n) : <html lang> correct dès le premier
+  // rendu + initialLocale passé au provider client (zéro mismatch hydratation).
+  const locale = await getRequestLocale();
+
   return (
-    <html lang="fr" suppressHydrationWarning>
+    <html lang={locale} suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        <Providers>{children}</Providers>
+        <Providers initialLocale={locale}>{children}</Providers>
       </body>
     </html>
   );

@@ -68,6 +68,12 @@ const productionHeaders = [
 const nextConfig: NextConfig = {
   output: "standalone",
   serverExternalPackages: ["imapflow", "mailparser", "nodemailer"],
+  // Core Web Vitals (features avancées) : tree-shuffling agressif des imports
+  // barrel — réduit drastiquement le JS initial (lucide-react ~40 % plus léger,
+  // recharts/date-fns chargés à la demande dans les vues concernées).
+  experimental: {
+    optimizePackageImports: ["lucide-react", "recharts", "date-fns"],
+  },
   typescript: {
     ignoreBuildErrors: true,
   },

@@ -1,10 +1,12 @@
 "use client";
 
 // Orbit — Shell applicatif : sidebar desktop + bottom nav mobile + header
+// Features avancées : i18n (nav/titres), palette de commandes, raccourcis
+// clavier globaux, bascule de thème système, bouton recherche (Ctrl+K).
 
 import { useEffect, useRef } from "react"
 import { format } from "date-fns"
-import { fr } from "date-fns/locale"
+import { fr, enGB, es } from "date-fns/locale"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -20,6 +22,12 @@ import { OrbitLogo } from "@/components/orbit/logo"
 import { NotificationCenter } from "@/components/orbit/notifications-center"
 import { SyncStatusBadge } from "@/components/offline/SyncStatusBadge"
 import { OfflineBanner } from "@/components/offline/OfflineBanner"
+import { ThemeToggle } from "@/components/theme/ThemeToggle"
+import { CommandPalette } from "@/components/command/CommandPalette"
+import { ShortcutHelpModal } from "@/components/shortcuts/ShortcutHelpModal"
+import { useKeyboardShortcuts } from "@/lib/shortcuts/useKeyboardShortcuts"
+import { openCommandPalette } from "@/lib/ui-intent"
+import { useI18n } from "@/lib/i18n/provider"
 import { useEmails } from "@/lib/api-client"
 import { usePwaStore } from "@/lib/pwa-store"
 import { promptInstall } from "@/components/orbit/pwa-register"
@@ -33,25 +41,20 @@ import {
   Settings,
   LogOut,
   Download,
+  Search,
 } from "lucide-react"
 
-const NAV: { view: OrbitView; label: string; icon: React.ElementType }[] = [
-  { view: "dashboard", label: "Tableau de bord", icon: LayoutDashboard },
-  { view: "calendar", label: "Calendrier", icon: CalendarDays },
-  { view: "tasks", label: "Tâches", icon: KanbanSquare },
-  { view: "emails", label: "Emails", icon: Mail },
-  { view: "assistant", label: "Assistant", icon: Bot },
-  { view: "settings", label: "Réglages", icon: Settings },
+const NAV: { view: OrbitView; icon: React.ElementType }[] = [
+  { view: "dashboard", icon: LayoutDashboard },
+  { view: "calendar", icon: CalendarDays },
+  { view: "tasks", icon: KanbanSquare },
+  { view: "emails", icon: Mail },
+  { view: "assistant", icon: Bot },
+  { view: "settings", icon: Settings },
 ]
 
-const VIEW_TITLES: Record<OrbitView, string> = {
-  dashboard: "Tableau de bord",
-  calendar: "Calendrier",
-  tasks: "Tâches",
-  emails: "Boîte de réception",
-  assistant: "Assistant IA",
-  settings: "Paramètres",
-}
+/** Locale date-fns de la langue UI courante. */
+const DATE_LOCALES = { fr, en: enGB, es } as const
 
 export function AppShell({
   user,
@@ -62,12 +65,18 @@ export function AppShell({
 }: {
   user: SessionUser
   view: OrbitView
-  onNavigate: (view: OrbitView) => void
+  /** Navigation SPA — élargie (emailId) pour la palette de commandes. */
+  onNavigate: (view: OrbitView, emailId?: string) => void
   onLogout: () => void
   children: React.ReactNode
 }) {
   const { data: emailsData } = useEmails()
   const { canInstall, installed } = usePwaStore()
+  const { t, locale } = useI18n()
+
+  // Raccourcis clavier globaux (Ctrl+K palette, Ctrl+N/T/E créations,
+  // Ctrl+1..6 vues, ? aide, / recherche). Monté une seule fois dans le shell.
+  useKeyboardShortcuts({ onNavigate })
 
   // Deep link depuis une notification OS : le Service Worker (v3) poste
   // { orbit: "navigate", view, … } quand l'utilisateur clique une notif
@@ -104,12 +113,12 @@ export function AppShell({
           <OrbitLogo size={34} />
           <div className="leading-tight">
             <p className="text-base font-semibold tracking-tight">Orbit</p>
-            <p className="text-[11px] text-muted-foreground">OS personnel</p>
+            <p className="text-[11px] text-muted-foreground">{t("nav.personalOs")}</p>
           </div>
         </div>
 
-        <nav className="flex-1 space-y-1 px-3" aria-label="Navigation principale">
-          {NAV.map(({ view: v, label, icon: Icon }) => {
+        <nav className="flex-1 space-y-1 px-3" aria-label={t("nav.mainNav")}>
+          {NAV.map(({ view: v, icon: Icon }) => {
             const active = view === v
             return (
               <button
@@ -123,7 +132,7 @@ export function AppShell({
                 aria-current={active ? "page" : undefined}
               >
                 <Icon className="size-4.5 shrink-0" aria-hidden />
-                <span className="flex-1 text-left">{label}</span>
+                <span className="flex-1 text-left">{t(`nav.${v}`)}</span>
                 {v === "emails" && unread > 0 && (
                   <Badge className="bg-violet-500/20 px-1.5 text-[10px] text-violet-600 dark:text-violet-400">
                     {unread}
@@ -150,7 +159,7 @@ export function AppShell({
               size="icon"
               className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
               onClick={onLogout}
-              aria-label="Se déconnecter"
+              aria-label={t("nav.logout")}
             >
               <LogOut className="size-4" aria-hidden />
             </Button>
@@ -162,20 +171,33 @@ export function AppShell({
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Header */}
         <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b border-border/60 bg-background/80 px-3 backdrop-blur-md sm:px-4">
-          {/* Logo mobile */}
+          {/* Logo mobile — texte masqué sous 420px : la place libérée évite
+              l'overflow du header (recherche + sync + notifs + avatar). */}
           <div className="flex items-center gap-2 lg:hidden">
             <OrbitLogo size={26} />
-            <span className="text-sm font-semibold tracking-tight">Orbit</span>
+            <span className="hidden text-sm font-semibold tracking-tight min-[420px]:inline">Orbit</span>
           </div>
 
           <span className="hidden text-sm font-medium text-muted-foreground lg:block">
-            {VIEW_TITLES[view]}
+            {view === "emails" ? t("nav.inbox") : t(`nav.${view}`)}
             <span className="ml-2 text-xs font-normal">
-              {format(new Date(), "EEE d MMM", { locale: fr })}
+              {format(new Date(), "EEE d MMM", { locale: DATE_LOCALES[locale] })}
             </span>
           </span>
 
           <div className="ml-auto flex items-center gap-1">
+            {/* Recherche globale / palette de commandes (Ctrl+K) */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-10"
+              onClick={() => openCommandPalette()}
+              aria-label={t("command.searchButton")}
+              title="Ctrl+K"
+            >
+              <Search className="size-5" aria-hidden />
+            </Button>
+
             {/* Statut de synchronisation offline-first v2 : hors ligne / sync /
                 N en attente (clic = sync) / conflits (clic = réglages) / âge */}
             <SyncStatusBadge onOpenSettings={() => onNavigate("settings")} />
@@ -186,11 +208,13 @@ export function AppShell({
                 size="icon"
                 className="size-10"
                 onClick={() => promptInstall()}
-                aria-label="Installer l'application Orbit"
+                aria-label={t("nav.installApp")}
               >
                 <Download className="size-5" aria-hidden />
               </Button>
             )}
+
+            <ThemeToggle />
 
             <NotificationCenter onNavigate={onNavigate} />
 
@@ -198,7 +222,7 @@ export function AppShell({
             <div className="lg:hidden">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-10" aria-label="Menu utilisateur">
+                  <Button variant="ghost" size="icon" className="size-10" aria-label={t("nav.userMenu")}>
                     <Avatar className="size-8 border border-border/60">
                       <AvatarFallback className="bg-primary/15 text-[10px] font-semibold text-primary">
                         {initials || "OR"}
@@ -213,11 +237,11 @@ export function AppShell({
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={() => onNavigate("settings")}>
                     <Settings className="size-4" aria-hidden />
-                    Paramètres
+                    {t("nav.settings")}
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={onLogout} className="text-destructive focus:text-destructive">
                     <LogOut className="size-4" aria-hidden />
-                    Se déconnecter
+                    {t("nav.logout")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -242,9 +266,9 @@ export function AppShell({
         <nav
           className="fixed inset-x-0 bottom-0 z-40 flex border-t border-border/60 bg-background/90 backdrop-blur-md lg:hidden"
           style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.375rem)" }}
-          aria-label="Navigation mobile"
+          aria-label={t("nav.mobileNav")}
         >
-          {NAV.map(({ view: v, label, icon: Icon }) => {
+          {NAV.map(({ view: v, icon: Icon }) => {
             const active = view === v
             return (
               <button
@@ -264,7 +288,7 @@ export function AppShell({
                     />
                   )}
                 </span>
-                <span className="truncate">{label.split(" ")[0]}</span>
+                <span className="truncate">{t(`nav.${v}`).split(" ")[0]}</span>
                 {active && (
                   <span
                     className="absolute top-0 h-0.5 w-8 rounded-full bg-primary"
@@ -276,6 +300,10 @@ export function AppShell({
           })}
         </nav>
       </div>
+
+      {/* ---------- Palette de commandes (Ctrl+K) + aide raccourcis (?) ---------- */}
+      <CommandPalette onNavigate={onNavigate} />
+      <ShortcutHelpModal />
     </div>
   )
 }

@@ -3,6 +3,7 @@
 // Orbit — Tableau de bord : vue d'ensemble de la journée
 
 import { useState } from "react"
+import { useQuery } from "@tanstack/react-query"
 import { format, isBefore, isToday, parseISO } from "date-fns"
 import { fr } from "date-fns/locale"
 import { toast } from "sonner"
@@ -14,11 +15,17 @@ import { EventCard, eventKeyOf } from "@/components/orbit/event-card"
 import { EventDialog } from "@/components/orbit/event-dialog"
 import { TaskModal } from "@/components/orbit/tasks/task-modal"
 import { PRIORITY_COLORS } from "@/components/orbit/tasks/priority-badge"
+// 20-c : section « Analytique » (stats + graphiques Recharts)
+import { StatsCards } from "@/components/orbit/analytics/StatsCards"
+import { DashboardCharts } from "@/components/orbit/analytics/DashboardCharts"
 import { useTimezone } from "@/hooks/useTimezone"
+import { useI18n } from "@/lib/i18n/provider"
+import type { AnalyticsDto } from "@/lib/analytics/types"
 import {
   useStats,
   useTaskMutations,
   useEmailMutations,
+  api,
 } from "@/lib/api-client"
 import type { SessionUser, TaskDto, EventDto, OrbitView } from "@/lib/types"
 import {
@@ -61,6 +68,14 @@ export function DashboardView({
   const { sync } = useEmailMutations()
   // 12-c : heures formatées dans le fuseau d'affichage (RÈGLE D'OR UTC).
   const { fmt, dayKey } = useTimezone()
+  // 20-c : analytique (agrégats + séries 14 j) — requête dédiée, rafraîchie
+  // au maximum toutes les 60 s (staleTime), mutations non concernées.
+  const { t } = useI18n()
+  const { data: analyticsData, isLoading: analyticsLoading } = useQuery({
+    queryKey: ["analytics"],
+    queryFn: () => api<{ analytics: AnalyticsDto }>("/api/analytics"),
+    staleTime: 60_000,
+  })
 
   const [eventDialogOpen, setEventDialogOpen] = useState(false)
   const [editEvent, setEditEvent] = useState<EventDto | null>(null)
@@ -250,6 +265,18 @@ export function DashboardView({
           )}
         </CardContent>
       </Card>
+
+      {/* ---------- Analytique (20-c) ---------- */}
+      <section aria-labelledby="analytics-heading" className="space-y-4">
+        <div>
+          <h2 id="analytics-heading" className="text-lg font-semibold tracking-tight">
+            {t("analytics.sectionTitle")}
+          </h2>
+          <p className="text-sm text-muted-foreground">{t("analytics.sectionDesc")}</p>
+        </div>
+        <StatsCards stats={analyticsData?.analytics} isLoading={analyticsLoading} />
+        <DashboardCharts stats={analyticsData?.analytics} isLoading={analyticsLoading} />
+      </section>
 
       {/* ---------- Agenda du jour + tâches ---------- */}
       {/* QA Task 8 : grid-cols-1 explicite (minmax(0,1fr)) — sans lui, la piste

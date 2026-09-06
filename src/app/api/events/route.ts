@@ -15,6 +15,7 @@ import { eventCreateSchema } from "@/lib/validators"
 import { clampRange } from "@/lib/calendar"
 import { loadExpandedEvents, computeConflicts, sanitizeText, toJsonInput } from "@/lib/events-service"
 import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import { triggerWebhooks } from "@/lib/api/webhooks"
 
 export async function GET(req: NextRequest) {
   const user = await getSessionUser()
@@ -105,6 +106,9 @@ export async function POST(req: NextRequest) {
       reminderLog: [],
     },
   })
+
+  // Webhook « event.created » — fire-and-forget, jamais bloquant.
+  void triggerWebhooks(user.id, "event.created", toEventDto(event)).catch(() => {})
 
   return NextResponse.json({ event: toEventDto(event), conflicts }, { status: 201 })
 }

@@ -19,6 +19,7 @@ import { eventUpdateSchema } from "@/lib/validators"
 import { computeConflicts, sanitizeText, appendException, isOccurrenceOfSeries, toJsonInput } from "@/lib/events-service"
 import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { recordTombstone } from "@/lib/sync-tombstones"
+import { triggerWebhooks } from "@/lib/api/webhooks"
 import type { Event } from "@prisma/client"
 
 type Params = { params: Promise<{ id: string }> }
@@ -113,6 +114,11 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       { start: startTime, end: endTime },
       [detached.id]
     )
+
+    // Webhook « event.updated » (occurrence détachée = résultat de l'édition)
+    // — fire-and-forget, jamais bloquant.
+    void triggerWebhooks(user.id, "event.updated", toEventDto(detached)).catch(() => {})
+
     return NextResponse.json({ event: toEventDto(detached), master: toEventDto(master), conflicts })
   }
 
@@ -166,6 +172,10 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   })
 
   const conflicts = await computeConflicts(user.id, { start: startTime, end: endTime }, [event.id])
+
+  // Webhook « event.updated » — fire-and-forget, jamais bloquant.
+  void triggerWebhooks(user.id, "event.updated", toEventDto(event)).catch(() => {})
+
   return NextResponse.json({ event: toEventDto(event), conflicts })
 }
 
@@ -210,6 +220,14 @@ export async function DELETE(req: NextRequest, { params }: Params) {
         ),
       },
     })
+
+    // Webhook « event.deleted » (occurrence identifiée par master + début ISO)
+    // — fire-and-forget, jamais bloquant.
+    void triggerWebhooks(user.id, "event.deleted", {
+      id: existing.id,
+      occurrenceStart: occurrenceStart.toISOString(),
+    }).catch(() => {})
+
     return NextResponse.json({ ok: true, master: toEventDto(master) })
   }
 
@@ -217,5 +235,9 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   await db.event.delete({ where: { id: existing.id } })
   // Tombstone : propagation de la suppression aux caches offline (multi-appareils)
   await recordTombstone(user.id, "event", existing.id)
+
+  // Webhook « event.deleted » — fire-and-forget, jamais bloquant.
+  void triggerWebhooks(user.id, "event.deleted", { id: existing.id }).catch(() => {})
+
   return NextResponse.json({ ok: true })
 }

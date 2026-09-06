@@ -99,7 +99,12 @@ export async function getSessionUser(): Promise<SessionUser | null> {
   if (!data) return null
   const user = await db.user.findUnique({
     where: { id: data.uid },
-    select: { id: true, email: true, name: true },
+    select: { id: true, email: true, name: true, preferences: true },
   })
-  return user ?? null
+  if (!user) return null
+  // Onboarding (features avancées) : drapeau dans User.preferences (JSON) —
+  // exposé à la SPA pour déclencher le wizard de première connexion.
+  const onboardingCompleted =
+    (user.preferences as Record<string, unknown> | null)?.onboardingCompleted === true
+  return { id: user.id, email: user.email, name: user.name, onboardingCompleted }
 }

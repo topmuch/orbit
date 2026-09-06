@@ -15,6 +15,7 @@ import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { taskUpdateSchema } from "@/lib/validators"
 import { loadOwnedTask, updateTaskWithRelations, taskDto } from "@/lib/tasks-service"
 import { recordTombstone } from "@/lib/sync-tombstones"
+import { triggerWebhooks } from "@/lib/api/webhooks"
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -52,6 +53,10 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   }
 
   const task = await updateTaskWithRelations(existing, parsed.data)
+
+  // Webhook « task.updated » — fire-and-forget, jamais bloquant.
+  void triggerWebhooks(user.id, "task.updated", taskDto(task)).catch(() => {})
+
   return NextResponse.json({ task: taskDto(task) })
 }
 
@@ -78,10 +83,18 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     await db.task.delete({ where: { id } })
     // Tombstone : propagation de la suppression aux caches offline (multi-appareils)
     await recordTombstone(user.id, "task", id)
+
+    // Webhook « task.deleted » — fire-and-forget, jamais bloquant.
+    void triggerWebhooks(user.id, "task.deleted", { id }).catch(() => {})
+
     return NextResponse.json({ ok: true, mode: "deleted" })
   }
 
   // Soft delete : archivage (masqué par défaut dans l'UI)
   await db.task.update({ where: { id }, data: { status: "archived" } })
+
+  // L'archivage est aussi une suppression vu des intégrations (DELETE).
+  void triggerWebhooks(user.id, "task.deleted", { id }).catch(() => {})
+
   return NextResponse.json({ ok: true, mode: "archived" })
 }

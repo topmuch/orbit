@@ -1,6 +1,7 @@
 "use client";
 
-// Orbit — Paramètres : profil, apparence, notifications, application (PWA)
+// Orbit — Paramètres : profil, apparence (clair/cosmos/système), langue (i18n),
+// notifications, application (PWA), données (import/export) & API/webhooks.
 
 import { useState } from "react"
 import { useTheme } from "next-themes"
@@ -38,6 +39,10 @@ import { promptInstall } from "@/components/orbit/pwa-register"
 import { DesignSystemShowcase } from "@/components/orbit/design-system-showcase"
 import { EmailAccountsCard } from "@/components/orbit/email-accounts-card"
 import { OfflineSyncCard } from "@/components/offline/OfflineSyncCard"
+import { DataCard } from "@/components/orbit/settings/data-card"
+import { ApiWebhooksCard } from "@/components/orbit/settings/api-webhooks-card"
+import { useI18n } from "@/lib/i18n/provider"
+import { locales, localeSelfNames, localeFlags, type Locale } from "@/lib/i18n/config"
 import type { SessionUser } from "@/lib/types"
 import type { NotificationPreferenceDto } from "@/lib/types"
 import {
@@ -67,10 +72,13 @@ import {
   Mail,
   Bot,
   CloudUpload,
+  Languages,
+  Monitor,
 } from "lucide-react"
 
 export function SettingsView({ user }: { user: SessionUser }) {
   const { theme, setTheme } = useTheme()
+  const { t, locale, setLocale } = useI18n()
   const { online, canInstall, installed, swReady } = usePwaStore()
   const offlineQueueCount = useOfflineQueueStore((s) => s.count)
   const profile = useProfileMutation()
@@ -149,13 +157,17 @@ export function SettingsView({ user }: { user: SessionUser }) {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Paramètres</h1>
+        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{t("settings.title")}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Profil, apparence, notifications et application.
+          {t("settings.subtitle")}
         </p>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* grid-cols-1 explicite (piste minmax(0,1fr)) : sans lui, la piste auto
+          implicite prend la min-content des cartes (pre curl, labels longs…)
+          → overflow horizontal ~570px en viewport 375px (cf. QA Task 8 du
+          dashboard, même racine). */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* ---------- Profil ---------- */}
         <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
           <CardHeader>
@@ -211,17 +223,17 @@ export function SettingsView({ user }: { user: SessionUser }) {
           </CardContent>
         </Card>
 
-        {/* ---------- Apparence ---------- */}
+        {/* ---------- Apparence (clair / cosmos / système) ---------- */}
         <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base font-medium">
               <Palette className="size-4 text-primary" aria-hidden />
-              Apparence
+              {t("theme.appearance")}
             </CardTitle>
-            <CardDescription>Mode clair ou cosmos sombre.</CardDescription>
+            <CardDescription>{t("theme.appearanceDesc")}</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <button
                 onClick={() => setTheme("light")}
                 className={`flex flex-col items-center gap-2 rounded-xl border p-4 transition-colors ${
@@ -230,7 +242,7 @@ export function SettingsView({ user }: { user: SessionUser }) {
                 aria-pressed={theme === "light"}
               >
                 <Sun className="size-6" aria-hidden />
-                <span className="text-sm font-medium">Clair</span>
+                <span className="text-sm font-medium">{t("theme.light")}</span>
               </button>
               <button
                 onClick={() => setTheme("dark")}
@@ -240,8 +252,49 @@ export function SettingsView({ user }: { user: SessionUser }) {
                 aria-pressed={theme === "dark"}
               >
                 <Moon className="size-6" aria-hidden />
-                <span className="text-sm font-medium">Cosmos</span>
+                <span className="text-sm font-medium">{t("theme.dark")}</span>
               </button>
+              <button
+                onClick={() => setTheme("system")}
+                className={`flex flex-col items-center gap-2 rounded-xl border p-4 transition-colors ${
+                  theme === "system" ? "border-primary bg-primary/10" : "border-border/60 hover:bg-accent/40"
+                }`}
+                aria-pressed={theme === "system"}
+              >
+                <Monitor className="size-6" aria-hidden />
+                <span className="text-sm font-medium">{t("theme.system")}</span>
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ---------- Langue (i18n fr/en/es) ---------- */}
+        <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base font-medium">
+              <Languages className="size-4 text-primary" aria-hidden />
+              {t("settings.language")}
+            </CardTitle>
+            <CardDescription>{t("settings.languageDesc")}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-3 gap-2" role="group" aria-label={t("settings.language")}>
+              {locales.map((l: Locale) => (
+                <button
+                  key={l}
+                  onClick={() => setLocale(l)}
+                  className={`flex flex-col items-center gap-1.5 rounded-xl border p-4 transition-colors ${
+                    locale === l ? "border-primary bg-primary/10" : "border-border/60 hover:bg-accent/40"
+                  }`}
+                  aria-pressed={locale === l}
+                  lang={l}
+                >
+                  <span className="text-2xl" aria-hidden>
+                    {localeFlags[l]}
+                  </span>
+                  <span className="text-sm font-medium">{localeSelfNames[l]}</span>
+                </button>
+              ))}
             </div>
           </CardContent>
         </Card>
@@ -382,6 +435,14 @@ export function SettingsView({ user }: { user: SessionUser }) {
 
         {/* ---------- Synchronisation hors ligne (offline-first v2) ---------- */}
         <OfflineSyncCard />
+
+        {/* ---------- Données : import/export (JSON, CSV, iCal) ---------- */}
+        <DataCard />
+
+        {/* ---------- API publique & webhooks (features avancées) ---------- */}
+        <div className="lg:col-span-2">
+          <ApiWebhooksCard />
+        </div>
 
         {/* ---------- IA & confidentialité ---------- */}
         <Card className="border-border/60 bg-card/70 backdrop-blur-sm lg:col-span-2">

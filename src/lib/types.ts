@@ -4,6 +4,8 @@ export type SessionUser = {
   id: string
   email: string
   name: string | null
+  /** Wizard de première connexion terminé (User.preferences JSON) — défaut false. */
+  onboardingCompleted: boolean
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

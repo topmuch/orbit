@@ -15,6 +15,7 @@ import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { taskCreateSchema } from "@/lib/validators"
 import { createTaskWithRelations, taskDto } from "@/lib/tasks-service"
 import { TASK_INCLUDE } from "@/lib/tasks-service"
+import { triggerWebhooks } from "@/lib/api/webhooks"
 import type { Prisma } from "@prisma/client"
 
 const SORT_FIELDS = new Set(["position", "dueDate", "priority", "createdAt", "title"])
@@ -144,5 +145,9 @@ export async function POST(req: NextRequest) {
   }
 
   const task = await createTaskWithRelations(user.id, parsed.data)
+
+  // Webhook « task.created » — fire-and-forget, jamais bloquant.
+  void triggerWebhooks(user.id, "task.created", taskDto(task)).catch(() => {})
+
   return NextResponse.json({ task: taskDto(task) }, { status: 201 })
 }

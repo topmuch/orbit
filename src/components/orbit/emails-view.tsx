@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { differenceInMinutes, format, parseISO } from "date-fns"
 import { fr } from "date-fns/locale"
 import { toast } from "sonner"
+import { useNewIntent } from "@/lib/ui-intent"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -146,6 +147,14 @@ export function EmailsView({
   const [composeDraft, setComposeDraft] = useState<ComposeDraft | null>(null)
   const [composeOpen, setComposeOpen] = useState(false)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Intention globale « nouvel email » (palette Ctrl+K / raccourci Ctrl+E) :
+  // abonnement au store d'intentions (rattrape aussi les intentions émises
+  // pendant le chargement différé de la vue — cf. lib/ui-intent).
+  useNewIntent("email", () => {
+    setComposeDraft(null)
+    setComposeOpen(true)
+  })
 
   const filters = useMemo(
     () => ({

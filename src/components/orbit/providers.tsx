@@ -7,8 +7,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "@/components/ui/sonner";
 import { PwaRegister } from "@/components/orbit/pwa-register";
+import { I18nProvider } from "@/lib/i18n/provider";
 
-export function Providers({ children }: { children: React.ReactNode }) {
+export function Providers({
+  children,
+  initialLocale,
+}: {
+  children: React.ReactNode;
+  /** Locale lue côté serveur (cookie NEXT_LOCALE) — zéro flash/mismatch. */
+  initialLocale?: string;
+}) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -48,15 +56,20 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
+      {/* Thème : suivi du PRÉFÉRENCE SYSTÈME par défaut (features avancées) —
+          next-thèmes pose la classe .dark avant peinture (anti-flash) et
+          bascule automatiquement quand l'OS change de mode. */}
       <ThemeProvider
         attribute="class"
-        defaultTheme="dark"
-        enableSystem={false}
+        defaultTheme="system"
+        enableSystem
         disableTransitionOnChange
       >
-        {children}
-        <Toaster richColors position="top-center" closeButton />
-        <PwaRegister />
+        <I18nProvider initialLocale={initialLocale}>
+          {children}
+          <Toaster richColors position="top-center" closeButton />
+          <PwaRegister />
+        </I18nProvider>
       </ThemeProvider>
     </QueryClientProvider>
   );

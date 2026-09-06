@@ -41,6 +41,7 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from "react"
 import { useQueryClient } from "@tanstack/react-query"
+import { useNewIntent } from "@/lib/ui-intent"
 import {
   DndContext,
   DragOverlay,
@@ -1369,6 +1370,15 @@ export function CalendarView() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<EventDto | null>(null)
   const [dialogDate, setDialogDate] = useState<Date | undefined>(undefined)
+
+  // Intention globale « nouvel événement » (palette Ctrl+K / raccourci Ctrl+N) :
+  // abonnement au store d'intentions (rattrape aussi les intentions émises
+  // pendant le chargement différé de la vue — cf. lib/ui-intent).
+  useNewIntent("event", () => {
+    setEditing(null)
+    setDialogDate(undefined)
+    setDialogOpen(true)
+  })
 
   const openCreate = useCallback(
     (instant: Date) => {

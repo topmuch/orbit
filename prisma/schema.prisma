@@ -28,6 +28,89 @@ model User {
   pushSubscriptions PushSubscription[]
   notifications    Notification[]
   notificationPreference NotificationPreference?
+  apiKeys          ApiKey[]
+  webhooks         Webhook[]
+}
+
+// ── API publique (features avancées) ─────────────────────────────────────────
+// Clés d'API pour les intégrations tierces (REST /api/v1/*). La clé brute
+// `orbit_<32 hex>` n'est JAMAIS stockée : seul son SHA-256 l'est (comparaison
+// par hash — vol de base = clés inutilisables). Le préfixe `orbit_prefix`
+// (8 car.) permet de reconnaître la clé dans l'UI SANS la dévoiler.
+model ApiKey {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /** Libellé lisible (« Zapier », « Script perso »…). */
+  name        String
+  /** SHA-256 hex de la clé brute — LA clé complète n'existe qu'une fois, à la création. */
+  keyHash     String    @unique
+  /** Préfixe non sensible affiché dans l'UI (ex. « orbit_a1b2c3d4 »). */
+  keyPrefix   String
+  /** Date de dernière utilisation (null = jamais servie). */
+  lastUsedAt  DateTime?
+  isActive    Boolean   @default(true)
+
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@index([userId])
+}
+
+// ── Webhooks sortants ────────────────────────────────────────────────────────
+// Livraison POST signée HMAC-SHA256 (en-tête X-Orbit-Signature: sha256=<hex>).
+// Le secret de signature est généré côté serveur et stocké CHIFFRÉ AES-256-GCM
+// (lib/secret-box, clé dérivée de AUTH_SECRET) : déchiffré uniquement au
+// moment de signer une livraison. SQLite : pas d'enum/arrays → événements en Json.
+model Webhook {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /** URL de destination (https exigé, validée Zod). */
+  url         String
+  /** Description optionnelle. */
+  description String?
+  /** Liste d'événements déclencheurs (JSON) : task.created|updated|deleted, event.created|updated|deleted, test. */
+  events      Json
+  /** Secret de signature AES-256-GCM (format v1:iv:tag:ct) — jamais en clair. */
+  secretEnc   String
+  isActive    Boolean   @default(true)
+
+  /** Dernier résultat (télémétrie UI). */
+  lastStatus  String? // "success" | "failed"
+  lastDeliveryAt DateTime?
+  lastError   String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  logs        WebhookLog[]
+
+  @@index([userId, isActive])
+}
+
+// Journal des livraisons (audit + diagnostic UI) — purgé au-delà de 100 entrées
+// par webhook (garde de taille, SQLite).
+model WebhookLog {
+  id          String    @id @default(cuid())
+  webhookId   String
+  webhook     Webhook   @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  /** Nom de l'événement livré (ex. « task.created ») ou « test ». */
+  event       String
+  /** "success" | "failed". */
+  status      String
+  /** Code HTTP de réponse du destinataire (null = réseau/timeout). */
+  statusCode  Int?
+  /** Message d'erreur (échec réseau, signature…). */
+  error       String?
+  /** Durée totale de la livraison en ms. */
+  durationMs  Int?
+  createdAt   DateTime  @default(now())
+
+  @@index([webhookId, createdAt])
 }
 
 // ── Comptes email IMAP réels ───────────────────────────────────────────────────

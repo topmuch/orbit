@@ -107,7 +107,10 @@ async function enqueueAndAwait<T>(path: string, method: string, init?: RequestIn
   return outcome.data as T;
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+// Exportée (features avancées) : les composants/settings hors de ce fichier
+// (cartes API & webhooks, analytics, onboarding…) montent leurs propres hooks
+// React Query au-dessus de ce helper au lieu d'éditer ce module partagé.
+export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
 
   // Simulation hors ligne (réglages/QA) : la mutation part directement en

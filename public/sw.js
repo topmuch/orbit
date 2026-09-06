@@ -60,6 +60,8 @@ const API_EXCLUDE = [
   "/api/events/export",
   "/api/email/accounts/test",
   "/api/sync/", // pull delta : TOUJOURS fraîcheur réseau (jamais servie du cache)
+  "/api/search", // résultats volatils par frappe : jamais de réponse cache
+  "/api/v1/", // API publique (clients tiers) : réseau direct, hors SW
 ];
 
 self.addEventListener("install", (event) => {

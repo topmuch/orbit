@@ -13,6 +13,7 @@
 import { useMemo, useState } from "react"
 import { addDays } from "date-fns"
 import { useQueryClient } from "@tanstack/react-query"
+import { useNewIntent } from "@/lib/ui-intent"
 import {
   KanbanSquare,
   ListTodo,
@@ -178,6 +179,15 @@ export function TasksView() {
   const [tagManagerOpen, setTagManagerOpen] = useState(false)
   const [taskToDelete, setTaskToDelete] = useState<TaskDto | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
+
+  // Intention globale « nouvelle tâche » (palette Ctrl+K / raccourci Ctrl+T) :
+  // abonnement au store d'intentions (rattrape aussi les intentions émises
+  // pendant le chargement différé de la vue — cf. lib/ui-intent).
+  useNewIntent("task", () => {
+    setEditingTask(null)
+    setModalStatus("todo")
+    setModalOpen(true)
+  })
 
   const tasks = useMemo(() => data?.tasks ?? [], [data])
 

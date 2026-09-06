@@ -22,6 +22,8 @@
 #   # Optionnels : IMAGE_TAG, OLLAMA_MODEL, OLLAMA_MODELS,
 #   # REMINDER_INTERVAL_MS, AI_SERVICE_TIMEOUT_MS, AI_CACHE_TTL_MS,
 #   # METRICS_SECRET, BACKUP_INTERVAL_SECONDS, TZ
+#   # + recherche full-text : MEILI_MASTER_KEY=<openssl rand -hex 32>
+#   #   (défini → moteur Meilisearch ; absent → moteur SQLite embarqué)
 #   # + monitoring : GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD
 #
 # ORDRE DE DÉMARRAGE (géré par depends_on, rien à faire à la main) :
@@ -144,6 +146,11 @@ services:
       REMINDER_INTERVAL_MS: "${REMINDER_INTERVAL_MS:-60000}"
       # Métriques Prometheus (/api/metrics) — optionnel
       METRICS_SECRET: "${METRICS_SECRET:-}"
+      # Recherche full-text (features avancées) : si MEILI_MASTER_KEY est
+      # défini, /api/search utilise le service meilisearch ci-dessous ; sinon
+      # repli automatique sur le moteur SQLite embarqué (échelle personnelle).
+      MEILI_HOST: "${MEILI_HOST:-}"
+      MEILI_MASTER_KEY: "${MEILI_MASTER_KEY:-}"
     volumes:
       - orbit_db:/app/db          # base SQLite
       - orbit_storage:/app/storage # pièces jointes emails (process.cwd()/storage/attachments)
@@ -161,6 +168,41 @@ services:
         limits:
           cpus: "2"
           memory: 1g
+
+  # ── Recherche full-text (Meilisearch v1.6) — OPTIONNEL ──────────────
+  # Moteur typo-tolérant < 50 ms : utilisé par /api/search (palette Ctrl+K)
+  # QUAND MEILI_HOST/MEILI_MASTER_KEY sont définis côté web. Activation :
+  #   1. .env.production : MEILI_HOST=http://meilisearch:7700
+  #                         MEILI_MASTER_KEY=$(openssl rand -hex 32)
+  #   2. docker compose --profile search … up -d (sinon : moteur SQLite)
+  # Interne au réseau (jamais exposé par Caddy — indexation depuis le web uniquement).
+  # Volume dédié meilisearch_data ; analytics désactivées (vie privée).
+  # Piège spec : les corps d'emails ne sont PAS indexés (extraits seuls).
+  meilisearch:
+    image: getmeili/meilisearch:v1.6
+    container_name: orbit-meilisearch
+    profiles: ["search"]
+    restart: unless-stopped
+    environment:
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:?MEILI_MASTER_KEY requis si vous activez le service meilisearch (openssl rand -hex 32)}
+      - MEILI_ENV=production
+      - MEILI_NO_ANALYTICS=true
+      - MEILI_NO_SEMAPHORE_CAP=1
+    volumes:
+      - meilisearch_data:/meili_data
+    networks:
+      - orbit_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7700/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
 
   # ── Micro-service IA (FastAPI, docker/ai-service EXISTANT) ───────────────
   # Même contrat que le mini-service bun de dev : /health, /analyze-email,
@@ -311,6 +353,10 @@ volumes:
   ollama_models:
     name: ollama_models
     # Modèles LLM (~4,9 Go pour llama3.1:8b).
+  meilisearch_data:
+    name: meilisearch_data
+    # Index de recherche full-text (profil « search » — reconstruisable
+    # depuis la base, donc non critique pour les sauvegardes).
   caddy_data:
     name: caddy_data
     # Certificats ACME + clés (perdus = redemande un certificat, pas grave
