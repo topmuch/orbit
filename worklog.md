@@ -845,3 +845,16 @@ Stage Summary:
 - Sidebar rose foncé (dégradé pink-800 → rose-950) + textes blancs/roses lisibles, bottom nav mobile assortie (rose-900)
 - 10 cartes KPI multicolores via KpiCard partagé : 4 stats principales (rose/orange/bleu/jaune) + 6 analytics (cycle) — contraste AA respecté (blanc sur zones sombres des dégradés, ambre foncé sur jaune)
 - Fichiers : kpi-card.tsx (NOUVEAU), dashboard-view.tsx, analytics/StatsCards.tsx, app-shell.tsx, globals.css — aucune logique/i18n/API modifiée, purement présentationnel
+
+---
+Task ID: 21-sync
+Agent: main (Z.ai Code)
+Task: Pousser le code vers GitHub (token fourni par l'utilisateur)
+
+Work Log:
+- git fetch : origin/main était déjà à 7a861d7 (la session précédente avait donc bien poussé les features avancées)
+- git push (token en URL à usage unique, jamais écrit dans .git/config) : 7a861d7..42cbd82 main → main
+- Vérifications post-push : aucun ghp_ dans .git/config ; git rev-parse main origin/main identiques (42cbd829d4723d21cf581003c6232e9bfe73ce0b)
+
+Stage Summary:
+- local = GitHub = 42cbd82 « feat(ui): dashboard rose — sidebar rose foncé + cartes KPI multicolores » — statut pushé confirmé
