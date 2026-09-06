@@ -530,3 +530,24 @@ Stage Summary:
 - OFFLINE COMPLET : lectures via SW v4 (network-first + cache API + X-Orbit-Offline, navigation offline.html, 13-b préservé par construction), écritures via outbox IndexedDB (FIFO, replay auto à la reconnexion, 4xx abandonné/5xx retenu, invalidation globale), notifications programmées via queue serveur scheduledAt (envoi à l'échéance exacte même app fermée) — les trois étages indépendants et documentés
 - Décisions : ne JAMAIS se fier à navigator.onLine (mensonger : portail captif, émulation CDP fuyarde) ; session mise en cache délibérément (rester identifié hors ligne, logout = POST réseau) ; un 4xx au replay n'interrompt pas la file (seuls 5xx/réseau stoppent) ; suppression de compte = SetNull (emails consultables) ; l'heure choisie d'une alerte programmée prime sur les heures calmes (choix explicite)
 - Limite sandbox documentée : la QA navigateur du push réel reste impossible en headless (permission OS) — la chaîne serveur a été validée par curl et le SW par enregistrement/contrôle des caches
+
+---
+Task ID: sync-restore (maintenance)
+Agent: main (Z.ai Code)
+Task: « Synchronise la version GitHub avec la version locale » — la sandbox avait restauré un snapshot ancien du disque (git HEAD + fichiers + .env + DB à l'état du 5 sept., avant Task 14/15/6-7) ; GitHub topmuch/orbit (55ecd6e) était la seule copie complète. Synchronisation = restauration du local depuis GitHub (l'inverse aurait détruit 3 livraisons).
+
+Work Log:
+- Diagnostic : fetch → origin/main (55ecd6e) ≠ HEAD local (30eee58, snapshot plateforme, commit UUID vide) ; divergence complète ; disque SANS src/lib/{imap,secret-box,offline-queue}.ts, worklog 243 lignes, .env réduit à DATABASE_URL, db/custom.db ancien schéma, :3032 arrêté
+- Décision de direction : GitHub = source de vérité (contient AI+push+IMAP+offline, ~20 000 lignes absentes du local) ; le local n'avait de plus que des scripts auto-générés tests/*.sh (ignorés par le .gitignore canonique)
+- git reset --hard origin/main → 55ecd6e : 251 fichiers restaurés (imap.ts, secret-box.ts, offline-queue.ts, worklog 532 lignes…) ; arborescence propre
+- .env reconstruit (secrets régénérés, jamais commités) : AUTH_SECRET (openssl rand -hex 32 — dérive aussi la clé AES-256-GCM de secret-box), REMINDER_SERVICE_SECRET, VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY (bunx web-push generate-vapid-keys), APP_URL, REMINDER_INTERVAL_MS=60s
+- bun install → +imapflow 1.7.8, @types/mailparser, mailparser (48 paquets) ; bun run db:push → schéma complet (EmailAccount, PushSubscription, Notification…) appliqué à la DB rollbackée
+- reminder-service :3032 relancé (bun run dev, --hot, log service.log) → cycle /api/notify 200 immédiat (rappels + email-sync IMAP + queue scheduledAt requêtés OK) ; Next :3000 auto-reload après Reload env: .env ; ai-service :3031 jamais interrompu
+- Re-seed : POST /api/auth/demo → Alex Martin + 10 événements, 12 tâches, 7 emails, 6 tags, 12 sous-tâches (aucun compte IMAP ni abonnement push = propre)
+- QA navigateur (agent-browser) : login démo 1 clic → dashboard complet (agenda du jour, Kanban, boîte, centre de notifications) ; page Emails 7 messages badges IA ; Réglages = carte comptes IMAP « Ajouter un compte » + préférences push + switch emails importants ; console 0 erreur ; mobile 390×844 OK ; capture docs/screenshots/qa-restore-sync-github.png
+- Publication : commit chore(sync) + push GitHub (URL à usage unique, token jamais écrit en config)
+
+Stage Summary:
+- Local = GitHub = 55ecd6e (+ ce commit) : synchronisation rétablie dans le seul sens préservant le travail (restauration, pas écrasement)
+- Incident plateforme documenté : rollback sandbox à un snapshot antérieur — mitige via GitHub comme sauvegarde canonique ; toujours vérifier git fetch + fichiers disque AVANT tout « push » demandé après une coupure de contexte
+- Environnement : 3 services UP (:3000 Next, :3031 IA, :3032 rappels), secrets frais, DB complète, seed démo intact
