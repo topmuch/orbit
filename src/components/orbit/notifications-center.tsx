@@ -11,7 +11,7 @@
 // Le badge du header cumule non-lues persistées + items live.
 
 import { useEffect, useMemo, useState } from "react"
-import { addHours, formatDistanceToNow, isBefore, parseISO } from "date-fns"
+import { addHours, formatDistanceToNow, isBefore, parseISO, addMinutes } from "date-fns"
 import { fr } from "date-fns/locale"
 import {
   Sheet,
@@ -21,8 +21,19 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -31,9 +42,11 @@ import {
   useEmails,
   useNotifications,
   useNotificationMutations,
+  useScheduleNotification,
 } from "@/lib/api-client"
 import { useTimezone } from "@/hooks/useTimezone"
 import type { NotificationDto, OrbitView } from "@/lib/types"
+import { toast } from "sonner"
 import {
   Bell,
   CalendarClock,
@@ -47,6 +60,9 @@ import {
   Bot,
   PartyPopper,
   CircleCheck,
+  Clock,
+  Loader2,
+  Send,
 } from "lucide-react"
 
 type LiveItem = {
@@ -93,6 +109,41 @@ export function NotificationCenter({
   const { markRead } = useNotificationMutations()
   const notifications = notifData?.notifications ?? []
   const unreadCount = notifData?.unreadCount ?? 0
+
+  // ── Programmer une alerte (file d'attente serveur scheduledAt — Task 7) ──
+  const schedule = useScheduleNotification()
+  const [scheduleOpen, setScheduleOpen] = useState(false)
+  const [scheduleTitle, setScheduleTitle] = useState("")
+  const [scheduleBody, setScheduleBody] = useState("")
+  // datetime-local : min = +10 min, défaut = +1 h, max = +7 j (validateur)
+  const toLocalInput = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+  const [scheduleWhen, setScheduleWhen] = useState(() => toLocalInput(addMinutes(new Date(), 60)))
+
+  async function handleSchedule(e: React.FormEvent) {
+    e.preventDefault()
+    const when = new Date(scheduleWhen)
+    if (Number.isNaN(when.getTime()) || when.getTime() <= Date.now()) {
+      toast.error("Choisissez une date future (dans 10 minutes au plus tôt).")
+      return
+    }
+    try {
+      await schedule.mutateAsync({
+        title: scheduleTitle.trim(),
+        body: scheduleBody.trim(),
+        scheduledAt: when.toISOString(),
+      })
+      toast.success("Alerte programmée ⏰", {
+        description: `Elle partira automatiquement à l'heure choisie — même app fermée.`,
+      })
+      setScheduleOpen(false)
+      setScheduleTitle("")
+      setScheduleBody("")
+      setScheduleWhen(toLocalInput(addMinutes(new Date(), 60)))
+    } catch (err) {
+      toast.error((err as Error).message)
+    }
+  }
 
   const now = new Date()
   const items: LiveItem[] = []
@@ -184,7 +235,17 @@ export function NotificationCenter({
             {unreadCount > 0 && (
               <Badge variant="secondary" className="font-normal">{unreadCount}</Badge>
             )}
-            <span className="ml-auto">
+            <span className="ml-auto flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5 px-2 text-xs text-muted-foreground"
+                onClick={() => setScheduleOpen(true)}
+                title="Programmer une alerte personnalisée"
+              >
+                <Clock className="size-4" aria-hidden />
+                Programmer
+              </Button>
               {unreadCount > 0 && (
                 <Button
                   variant="ghost"
@@ -260,6 +321,7 @@ export function NotificationCenter({
                   <HistoryItem
                     key={n.id}
                     notification={n}
+                    fmt={fmt}
                     onOpen={() => {
                       if (!n.isRead) markRead.mutate({ notificationId: n.id })
                       if (n.data?.view) onNavigate(n.data.view)
@@ -271,6 +333,72 @@ export function NotificationCenter({
           </div>
         </ScrollArea>
       </SheetContent>
+
+      {/* ── Programmer une alerte (queue serveur scheduledAt — Task 7) ── */}
+      <Dialog open={scheduleOpen} onOpenChange={setScheduleOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Clock className="size-4 text-primary" aria-hidden />
+              Programmer une alerte
+            </DialogTitle>
+            <DialogDescription>
+              L&apos;alerte rejoint la file d&apos;attente du serveur et part automatiquement à
+              l&apos;heure choisie — même application fermée (max 7 jours).
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSchedule} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="schedule-title">Titre</Label>
+              <Input
+                id="schedule-title"
+                value={scheduleTitle}
+                onChange={(e) => setScheduleTitle(e.target.value)}
+                placeholder="Ex. Appeler le garage"
+                maxLength={100}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="schedule-body">Message</Label>
+              <Textarea
+                id="schedule-body"
+                value={scheduleBody}
+                onChange={(e) => setScheduleBody(e.target.value)}
+                placeholder="Détails de l&apos;alerte…"
+                maxLength={500}
+                rows={3}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="schedule-when">Envoyer à</Label>
+              <Input
+                id="schedule-when"
+                type="datetime-local"
+                value={scheduleWhen}
+                onChange={(e) => setScheduleWhen(e.target.value)}
+                min={toLocalInput(addMinutes(new Date(), 10))}
+                required
+              />
+              <p className="text-xs text-muted-foreground">
+                Heure de votre appareil — la notification push et l&apos;historique in-app
+                partiront à ce moment précis.
+              </p>
+            </div>
+            <DialogFooter>
+              <Button type="submit" disabled={schedule.isPending} className="gap-1.5">
+                {schedule.isPending ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                ) : (
+                  <Send className="size-4" aria-hidden />
+                )}
+                Programmer
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </Sheet>
   )
 }
@@ -279,9 +407,11 @@ export function NotificationCenter({
 function HistoryItem({
   notification: n,
   onOpen,
+  fmt,
 }: {
   notification: NotificationDto
   onOpen: () => void
+  fmt?: (d: Date, pattern: string) => string
 }) {
   const meta = TYPE_META[n.type] ?? TYPE_META.SYSTEM
   const Icon = meta.icon
@@ -289,6 +419,11 @@ function HistoryItem({
     addSuffix: true,
     locale: fr,
   })
+  // File planifiée : pas encore envoyée, heure programmée dans le futur
+  const scheduledFor =
+    n.scheduledAt && !n.isSent && parseISO(n.scheduledAt) > new Date()
+      ? parseISO(n.scheduledAt)
+      : null
 
   return (
     <button
@@ -306,13 +441,29 @@ function HistoryItem({
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{n.title}</span>
-          {!n.isRead && (
+          {scheduledFor && (
+            <Badge
+              variant="outline"
+              className="ml-auto shrink-0 gap-1 border-amber-500/40 px-1.5 text-[10px] text-amber-600 dark:text-amber-400"
+            >
+              <Clock className="size-2.5" aria-hidden />
+              planifiée
+            </Badge>
+          )}
+          {!n.isRead && !scheduledFor && (
             <CircleCheck className="ml-auto size-3.5 shrink-0 text-primary" aria-hidden />
           )}
         </span>
         <span className="mt-0.5 block text-xs text-muted-foreground">{n.body}</span>
         <span className="mt-1 block text-[10px] uppercase tracking-wide text-muted-foreground/70">
-          {meta.label} · {timeAgo}
+          {meta.label} ·{" "}
+          {scheduledFor
+            ? `envoi ${
+                fmt
+                  ? fmt(scheduledFor, "EEE d MMM 'à' HH:mm")
+                  : scheduledFor.toLocaleString("fr-FR")
+              }`
+            : timeAgo}
         </span>
       </span>
     </button>

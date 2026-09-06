@@ -18,6 +18,9 @@ import type {
   TaskStatsDto,
   TagDto,
   EmailDto,
+  EmailAccountDto,
+  EmailAccountTestResult,
+  EmailSyncResult,
   EventSuggestion,
   StatsDto,
   AIPrioritySuggestion,
@@ -28,11 +31,87 @@ import type {
 
 // ---------- Fetch de base ----------
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
+/**
+ * Chemins NON mis en file quand le réseau tombe :
+ *  • /api/ai/*        → l'IA nécessite le serveur (réponse enrichie en direct)
+ *  • /api/auth/*      → session (login offline n'a pas de sens)
+ *  • /api/notify      → envoi push / planification (besoin du réseau)
+ *  • /api/subscribe   → inscription push navigateur
+ *  • /api/email/*     → test/CRUD de compte = connexion IMAP immédiate requise
+ *  • /api/emails/sync → synchronisation IMAP
+ *  • /api/events/import, /api/events/export, /api/export → fichiers/binaires
+ * Tout le reste (tasks, events, tags, emails, mark-read, profile…) est mis
+ * en file IndexedDB et rejoué à la reconnexion (lib/offline-queue — Task 7).
+ */
+const OFFLINE_QUEUE_EXCLUDED = [
+  "/api/ai/",
+  "/api/auth/",
+  "/api/notify",
+  "/api/subscribe",
+  "/api/email/",
+  "/api/emails/sync",
+  "/api/events/import",
+  "/api/events/export",
+  "/api/export",
+];
+
+function isOfflineQueueable(path: string, method: string): boolean {
+  if (method === "GET" || method === "HEAD") return false;
+  if (path.startsWith("/api/events/import")) return false; // FormData — jamais en file
+  return !OFFLINE_QUEUE_EXCLUDED.some((p) => path.startsWith(p));
+}
+
+/** Erreur réseau (fetch échoué) ≠ erreur applicative (4xx/5xx JSON). */
+function isNetworkDrop(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    /fetch|network|réseau|failed/i.test(error.message)
+  );
+}
+
+/**
+ * Mutation hors ligne : mise en file + ATTENTE du replay (l'UI reste sur son
+ * spinner « en cours » ; à la reconnexion la promesse se résout avec la
+ * VRAIE réponse serveur). Timeout 15 min → l'UI affiche l'erreur mais
+ * l'action RESTE en file (elle partira au prochain retour du réseau).
+ */
+async function enqueueAndAwait<T>(path: string, method: string, init?: RequestInit): Promise<T> {
+  const { enqueueMutation, waitForOutcome, mutationLabel } = await import("@/lib/offline-queue");
+  const { toast } = await import("sonner");
+  const label = mutationLabel(path, method);
+  const body = typeof init?.body === "string" ? init.body : null;
+
+  const item = await enqueueMutation(path, method, body, label);
+  toast.info("Hors ligne — action mise en file d'attente", {
+    description: `« ${label} » sera envoyée automatiquement dès la reconnexion.`,
   });
+
+  const outcome = await waitForOutcome(item.id, 15 * 60_000);
+  if (!outcome.ok) {
+    throw new Error(outcome.error ?? "Synchronisation impossible");
+  }
+  return outcome.data as T;
+}
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...init,
+    });
+  } catch (error) {
+    // Réseau tombé PENDANT une mutation → file d'attente offline (Task 7).
+    // On ne se fie PAS à navigator.onLine : il ment régulièrement (WiFi
+    // « connecté » sans internet, portail captif…) — un TypeError de fetch
+    // same-origin est TOUJOURS un problème réseau. La garde de replay (60 s
+    // + événement online) rattrape instantanément un vrai réseau présent.
+    if (isNetworkDrop(error) && isOfflineQueueable(path, method)) {
+      return enqueueAndAwait<T>(path, method, init);
+    }
+    throw error;
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => null)
     throw new Error(body?.error ?? `Erreur ${res.status}`)
@@ -509,7 +588,7 @@ export function useEmailMutations() {
     onSuccess: invalidate,
   })
   const sync = useMutation({
-    mutationFn: () => api<{ ok: boolean; count: number }>("/api/emails/sync", { method: "POST" }),
+    mutationFn: () => api<EmailSyncResult>("/api/emails/sync", { method: "POST" }),
     onSuccess: invalidate,
   })
   const analyze = useMutation({
@@ -522,6 +601,105 @@ export function useEmailMutations() {
   })
 
   return { patch, remove, sync, analyze }
+}
+
+// ---------- Comptes email IMAP (Task 6) ----------
+
+/** Comptes IMAP de l'utilisateur (JAMAIS de mot de passe dans les DTO). */
+export function useEmailAccounts() {
+  return useQuery<{ accounts: EmailAccountDto[] }>({
+    queryKey: ["email-accounts"],
+    queryFn: () => api<{ accounts: EmailAccountDto[] }>("/api/email/accounts"),
+    staleTime: 60_000,
+  })
+}
+
+/** Entrées du formulaire de compte (mot de passe en clair UNIQUEMENT en
+ *  mémoire le temps de l'appel — jamais persisté côté client). */
+export type EmailAccountInput = {
+  label?: string
+  address: string
+  imapHost: string
+  imapPort: number
+  imapSecure: boolean
+  username: string
+  password: string
+  allowSelfSigned: boolean
+  syncIntervalMin: number
+  fetchDays: number
+  maxMessages: number
+}
+
+export function useEmailAccountMutations() {
+  const qc = useQueryClient()
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["email-accounts"] })
+    qc.invalidateQueries({ queryKey: ["emails"] })
+    qc.invalidateQueries({ queryKey: ["stats"] })
+  }
+
+  /** Tester une connexion SANS rien enregistrer. */
+  const test = useMutation({
+    mutationFn: (input: Pick<EmailAccountInput, "imapHost" | "imapPort" | "imapSecure" | "username" | "password" | "allowSelfSigned">) =>
+      api<EmailAccountTestResult>("/api/email/accounts/test", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+  })
+
+  const create = useMutation({
+    mutationFn: (input: EmailAccountInput) =>
+      api<{ account: EmailAccountDto }>("/api/email/accounts", {
+        method: "POST",
+        body: JSON.stringify({ ...input, test: true }),
+      }),
+    onSuccess: invalidate,
+  })
+
+  /** PATCH : champs optionnels — password vide = inchangé. */
+  const update = useMutation({
+    mutationFn: (vars: {
+      id: string
+      input: Partial<Omit<EmailAccountInput, "password">> & { password?: string; isActive?: boolean; label?: string | null }
+    }) =>
+      api<{ account: EmailAccountDto }>(`/api/email/accounts/${vars.id}`, {
+        method: "PATCH",
+        // test:true → vérifie la connexion si hôte/port/identifiant/mot de passe changent
+        body: JSON.stringify({ ...vars.input, test: vars.input.password !== undefined || vars.input.imapHost !== undefined }),
+      }),
+    onSuccess: invalidate,
+  })
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api<{ ok: boolean }>(`/api/email/accounts/${id}`, { method: "DELETE" }),
+    onSuccess: invalidate,
+  })
+
+  /** Synchroniser UN compte maintenant. */
+  const syncOne = useMutation({
+    mutationFn: (id: string) =>
+      api<{ ok: boolean; count: number; error: string | null }>(`/api/email/accounts/${id}/sync`, {
+        method: "POST",
+      }),
+    onSuccess: invalidate,
+  })
+
+  return { test, create, update, remove, syncOne }
+}
+
+// ---------- Notifications planifiées (alertes personnalisées programmées) ----------
+
+/** Programme une alerte personnalisée (queue serveur scheduledAt). */
+export function useScheduleNotification() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (vars: { title: string; body: string; scheduledAt: string }) =>
+      api<{ ok: boolean; scheduled: boolean; notificationId: string }>("/api/notify", {
+        method: "POST",
+        body: JSON.stringify({ type: "custom", ...vars }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  })
 }
 
 // ---------- IA (analyse d'emails + assistant) ----------

@@ -219,6 +219,49 @@ export const emailPatchSchema = z.object({
   isProcessed: z.boolean().optional(),
 })
 
+// ── Comptes email IMAP ───────────────────────────────────────────────────
+
+export const emailAccountCreateSchema = z.object({
+  label: z.string().trim().max(60).optional(),
+  address: z.string().trim().email("Adresse email invalide"),
+  imapHost: z.string().trim().min(3).max(200),
+  imapPort: z.number().int().min(1).max(65535).default(993),
+  imapSecure: z.boolean().default(true),
+  username: z.string().trim().min(1).max(200),
+  password: z.string().min(1).max(500),
+  allowSelfSigned: z.boolean().default(false),
+  syncIntervalMin: z.number().int().min(5).max(1440).default(15),
+  fetchDays: z.number().int().min(1).max(365).default(30),
+  maxMessages: z.number().int().min(1).max(500).default(100),
+  // Tester la connexion AVANT tout enregistrement (recommandé : toujours vrai)
+  test: z.boolean().default(true),
+})
+
+export const emailAccountPatchSchema = z.object({
+  label: z.string().trim().max(60).nullable().optional(),
+  imapHost: z.string().trim().min(3).max(200).optional(),
+  imapPort: z.number().int().min(1).max(65535).optional(),
+  imapSecure: z.boolean().optional(),
+  username: z.string().trim().min(1).max(200).optional(),
+  password: z.string().min(1).max(500).optional(), // → re-chiffré si fourni
+  allowSelfSigned: z.boolean().optional(),
+  syncIntervalMin: z.number().int().min(5).max(1440).optional(),
+  fetchDays: z.number().int().min(1).max(365).optional(),
+  maxMessages: z.number().int().min(1).max(500).optional(),
+  isActive: z.boolean().optional(),
+  // Modifier l'hôte/port/identifiant déclenche un test de connexion préalable
+  test: z.boolean().default(false),
+})
+
+export const emailAccountTestSchema = z.object({
+  imapHost: z.string().trim().min(3).max(200),
+  imapPort: z.number().int().min(1).max(65535).default(993),
+  imapSecure: z.boolean().default(true),
+  username: z.string().trim().min(1).max(200),
+  password: z.string().min(1).max(500),
+  allowSelfSigned: z.boolean().default(false),
+})
+
 export const pushSubscribeSchema = z.object({
   endpoint: z.string().url(),
   keys: z.object({ p256dh: z.string(), auth: z.string() }),
@@ -266,12 +309,23 @@ export const notificationPreferencesSchema = z.object({
     .or(z.literal("")),
 })
 
-// Notification envoyée à la demande (API de test / alertes personnalisées)
+// Notification envoyée à la demande (API de test / alertes personnalisées).
+// scheduledAt (ISO futur, max +7 j) : l'alerte entre dans la FILE D'ATTENTE
+// planifiée (Notification.scheduledAt) et part au moment voulu via le cycle
+// reminder-service — cf. /api/notify type "custom".
 export const notificationSendSchema = z.object({
   title: z.string().min(1).max(100),
   body: z.string().min(1).max(500),
   tag: z.string().max(80).optional(),
   data: z.record(z.string(), z.unknown()).optional(),
+  scheduledAt: z
+    .string()
+    .datetime({ offset: true })
+    .refine((v) => {
+      const t = Date.parse(v)
+      return Number.isFinite(t) && t > Date.now() && t < Date.now() + 7 * 24 * 3600 * 1000
+    }, "La date doit être future (max 7 jours)")
+    .optional(),
 })
 
 export const chatSchema = z.object({

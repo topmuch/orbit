@@ -2,7 +2,7 @@
 
 // Orbit — Providers globaux (React Query, thème, toasts, PWA)
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "@/components/ui/sonner";
@@ -21,6 +21,16 @@ export function Providers({ children }: { children: React.ReactNode }) {
         },
       })
   );
+
+  // Task 7 offline : la file d'attente des mutations rejouée avec succès
+  // → les données serveur ont changé → on rafraîchit TOUTES les requêtes.
+  useEffect(() => {
+    const onSynced = () => {
+      queryClient.invalidateQueries()
+    };
+    window.addEventListener("orbit:data-synced", onSynced);
+    return () => window.removeEventListener("orbit:data-synced", onSynced);
+  }, [queryClient]);
 
   return (
     <QueryClientProvider client={queryClient}>

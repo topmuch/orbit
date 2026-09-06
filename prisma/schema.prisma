@@ -24,9 +24,62 @@ model User {
   tasks            Task[]
   tags             Tag[]
   emailLogs        EmailLog[]
+  emailAccounts    EmailAccount[]
   pushSubscriptions PushSubscription[]
   notifications    Notification[]
   notificationPreference NotificationPreference?
+}
+
+// ── Comptes email IMAP réels ───────────────────────────────────────────────────
+// Le mot de passe IMAP n'est JAMAIS stocké en clair : chiffrement AES-256-GCM
+// (lib/secret-box, clé dérivée de AUTH_SECRET) — cf. docs/email-imap-guide.md.
+model EmailAccount {
+  id        String @id @default(cuid())
+  userId    String
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /** Libellé d'affichage optionnel (« Perso », « Travail »…) */
+  label     String?
+  /** Adresse email du compte (unique par utilisateur) */
+  address   String
+
+  // Connexion IMAP (lecture seule sur la boîte — jamais de modification serveur)
+  imapHost  String
+  imapPort  Int     @default(993)
+  /** true = TLS implicite (993) · false = STARTTLS (143) */
+  imapSecure Boolean @default(true)
+  /** Identifiant IMAP (souvent = adresse email) */
+  username  String
+  /** Mot de passe chiffré AES-256-GCM (format v1:iv:tag:ct) — JAMAIS en clair */
+  passwordEnc String
+  /** TLS auto-signé accepté (QA/serveurs internes — déconseillé en production) */
+  allowSelfSigned Boolean @default(false)
+
+  // Réglages de synchronisation
+  /** Intervalle de synchronisation automatique (minutes, min 5) */
+  syncIntervalMin Int @default(15)
+  /** Fenêtre de récupération initiale (jours) */
+  fetchDays  Int @default(30)
+  /** Nombre max de messages par synchronisation */
+  maxMessages Int @default(100)
+
+  /** Compte actif (false = suspendu, plus de sync) */
+  isActive  Boolean @default(true)
+
+  // Télémétrie de synchronisation (jamais de contenu)
+  lastSyncAt     DateTime?
+  /** "ok" | "error" */
+  lastSyncStatus String?
+  lastSyncError  String?
+  lastSyncCount  Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  emails EmailLog[]
+
+  @@unique([userId, address])
+  @@index([userId, isActive])
 }
 
 model Event {
@@ -153,7 +206,8 @@ model EmailLog {
   id             String    @id @default(cuid())
   userId         String
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messageId      String    @unique
+  /** Message-ID MIME — dédoublonné PAR UTILISATEUR (multi-comptes possibles) */
+  messageId      String
   fromAddress    String
   fromName       String?
   subject        String
@@ -164,7 +218,14 @@ model EmailLog {
   suggestedEvent Json? // Résultat d'extraction IA en attente de confirmation
   createdAt      DateTime  @default(now())
 
+  /** Compte IMAP d'origine (null = démo/emails synthétiques) — conservé
+   *  à la suppression du compte (SetNull : l'email reste consultable) */
+  accountId      String?
+  account        EmailAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, messageId])
   @@index([userId, receivedAt])
+  @@index([accountId])
 }
 
 model PushSubscription {

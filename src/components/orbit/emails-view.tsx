@@ -33,6 +33,7 @@ import {
   Sparkles,
   Trash2,
   MailOpen,
+  MailPlus,
   Search,
   CalendarCheck,
   CalendarPlus,
@@ -44,6 +45,7 @@ import {
   FileText,
   MapPin,
   Users,
+  Server,
 } from "lucide-react"
 import { AiSummaryDialog } from "@/components/orbit/ai/ai-summary-dialog"
 
@@ -164,7 +166,22 @@ export function EmailsView({
           onClick={async () => {
             try {
               const res = await sync.mutateAsync()
-              toast.success(`${res.count} nouvel(s) email(s)`)
+              if (res.demo) {
+                toast.info("Mode démonstration", {
+                  description:
+                    `${res.count} email(s) d'exemple ajoutés — connectez un compte IMAP dans les Réglages pour recevoir vos vrais messages.`,
+                })
+              } else {
+                const failures = (res.accounts ?? []).filter((a) => !a.ok)
+                toast[failures.length ? "warning" : "success"](
+                  `${res.count} nouveau(x) email(s) synchronisé(s)`,
+                  {
+                    description: failures.length
+                      ? `Échec : ${failures.map((f) => f.address).join(", ")} — vérifiez le compte dans les Réglages.`
+                      : undefined,
+                  }
+                )
+              }
             } catch (err) {
               toast.error((err as Error).message)
             }
@@ -188,6 +205,17 @@ export function EmailsView({
               <p className="text-sm">
                 {search ? "Aucun résultat pour cette recherche" : "Boîte vide — synchronisez vos emails"}
               </p>
+              {!search && onNavigate && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-1 gap-1.5"
+                  onClick={() => onNavigate("settings")}
+                >
+                  <MailPlus className="size-4" aria-hidden />
+                  Connecter un compte IMAP
+                </Button>
+              )}
             </div>
           ) : (
             filtered.map((email) => {
@@ -281,6 +309,16 @@ export function EmailsView({
               <span>&lt;{selected.fromAddress}&gt;</span>
               <span>·</span>
               <span>{format(parseISO(selected.receivedAt), "EEEE d MMMM yyyy 'à' HH:mm", { locale: fr })}</span>
+              {selected.accountAddress && (
+                <Badge
+                  variant="outline"
+                  className="gap-1 border-amber-500/30 px-1.5 text-[10px] text-amber-600 dark:text-amber-400"
+                  title={`Synchronisé depuis ${selected.accountAddress} (IMAP, lecture seule)`}
+                >
+                  <Server className="size-2.5" aria-hidden />
+                  {selected.accountAddress}
+                </Badge>
+              )}
             </div>
           </div>
 

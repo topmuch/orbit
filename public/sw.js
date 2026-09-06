@@ -1,19 +1,31 @@
-/* Orbit — Service Worker v3
+/* Orbit — Service Worker v4
    ─────────────────────────────────────────────────────────────────────────
-   Deux rôles :
-   1. CACHE/PWA (production) : navigations network-first, statiques
-      cache-first, API hors cache. EN DÉVELOPPEMENT (localhost:3000) le
-      handler fetch est DÉSACTIVÉ : les chunks /_next/ dev ne sont pas
-      hashés et un cache-first gèlerait le bundle (bug 13-b) — mais le SW
-      reste enregistré pour permettre les notifications push en dev.
+   Trois rôles :
+   1. OFFLINE COMPLET (Task 7) :
+      • Lectures /api (GET) : network-first puis CACHE de secours (données
+        consultables hors ligne, marquées X-Orbit-Offline: 1) ;
+      • Navigations : réseau d'abord, page « / » en cache (prod) sinon
+        offline.html — JAMAIS de bundle /_next/ mis en cache en dev
+        (bug 13-b : chunks non hashés → bundle gelé) ;
+      • Statiques (prod) : cache-first (chunks hashés par contenu).
+      EN DÉVELOPPEMENT le handler fetch se limite STRICTEMENT aux GET /api
+      et à la navigation de secours — les chunks et la page dev ne sont
+      JAMAIS servis depuis le cache.
    2. NOTIFICATIONS (v3) : affichage des push reçus (payload enrichi),
       actions par type (Ouvrir / Ignorer / Terminée), deep link par
       postMessage vers l'app ouverte (navigation SPA sans rechargement),
       « terminer une tâche » directement depuis la notification, et
       marquage « lu » de l'historique à la fermeture.
+   3. MISE À JOUR : skipWaiting sur message (pwa-register) + purge des
+      caches obsolètes à l'activation (orbit-v3 et moins).
+
+   Les MUTATIONS hors ligne ne passent PAS par le SW : elles sont mises en
+   file IndexedDB par la page (lib/offline-queue) et rejouées à la
+   reconnexion — cf. docs/offline-guide.md.
    ───────────────────────────────────────────────────────────────────────── */
 
-const CACHE = "orbit-v3";
+const CACHE = "orbit-v4";
+const API_CACHE = "orbit-api-v4";
 const IS_DEV =
   location.hostname === "localhost" || location.hostname === "127.0.0.1";
 
@@ -25,6 +37,20 @@ const PRECACHE = [
   "/icons/icon-512.png",
 ];
 
+/* APIs dont la réponse ne doit JAMAIS servir depuis le cache :
+   diagnostic push, IA (réponses générées), export de fichiers (binaires),
+   test IMAP (POST de toute façon). La SESSION est volontairement cachée :
+   network-first → toujours fraîche en ligne ; hors ligne, le dernier état
+   connu permet de rester identifié (déconnexion = POST, réseau requis). */
+const API_EXCLUDE = [
+  "/api/notify",
+  "/api/subscribe",
+  "/api/ai/",
+  "/api/export",
+  "/api/events/export",
+  "/api/email/accounts/test",
+];
+
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
@@ -32,7 +58,7 @@ self.addEventListener("install", (event) => {
       .then((cache) =>
         // Dev : précachage minimal (jamais la page dev), prod : complet.
         IS_DEV
-          ? cache.addAll(["/manifest.json", "/offline.html"]).catch(() => {})
+          ? cache.addAll(["/manifest.json", "/offline.html", "/icons/icon-192.png"]).catch(() => {})
           : cache.addAll(PRECACHE).catch(() => {})
       )
       .then(() => self.skipWaiting())
@@ -43,54 +69,140 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      // Purge de tous les caches d'une autre version (v3 et moins, api vN…)
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((k) => k !== CACHE && k !== API_CACHE)
+            .map((k) => caches.delete(k))
+        )
+      )
       .then(() => self.clients.claim())
   );
 });
 
-/* Cache/PWA — PRODUCTION UNIQUEMENT (cf. en-tête : bug 13-b en dev). */
-if (!IS_DEV) {
-  self.addEventListener("fetch", (event) => {
-    const req = event.request;
-    if (req.method !== "GET") return;
+/* ══════════════════ Cache/PWA + Offline (Task 7) ══════════════════ */
 
-    const url = new URL(req.url);
-    if (url.origin !== location.origin) return;
-    if (url.pathname.startsWith("/api/")) return; // données : toujours réseau
-    if (url.pathname.startsWith("/_next/webpack-hmr")) return;
-
-    if (req.mode === "navigate") {
-      event.respondWith(
-        fetch(req)
-          .then((res) => {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put("/", copy));
-            return res;
-          })
-          .catch(() =>
-            caches.match(req).then((cached) => cached || caches.match("/offline.html"))
-          )
-      );
-      return;
+/** Limite le cache API (LRU approximatif : on garde les 100 plus récents). */
+async function trimApiCache(cache) {
+  const keys = await cache.keys();
+  if (keys.length > 150) {
+    for (const key of keys.slice(0, keys.length - 100)) {
+      await cache.delete(key).catch(() => {});
     }
-
-    event.respondWith(
-      caches.match(req).then(
-        (cached) =>
-          cached ||
-          fetch(req).then((res) => {
-            if (res.ok) {
-              const copy = res.clone();
-              caches.open(CACHE).then((c) => c.put(req, copy));
-            }
-            return res;
-          })
-      )
-    );
-  });
+  }
 }
 
-/* ══════════════════ Web Push (v3) ══════════════════
+function isApiExcluded(pathname) {
+  return API_EXCLUDE.some((p) => pathname.startsWith(p));
+}
+
+self.addEventListener("fetch", (event) => {
+  const req = event.request;
+  const url = new URL(req.url);
+
+  // Même origine uniquement, GET uniquement
+  if (url.origin !== location.origin || req.method !== "GET") return;
+
+  /* ── 1. Navigations : réseau d'abord, secours hors ligne ─────────────────
+     (dev ET prod : en dev on ne sert JAMAIS la page « / » du cache —
+     uniquement offline.html en secours → bug 13-b impossible) */
+  if (req.mode === "navigate") {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (!IS_DEV) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put("/", copy));
+          }
+          return res;
+        })
+        .catch(async () => {
+          if (IS_DEV) {
+            return (
+              (await caches.match("/offline.html")) ||
+              new Response("Hors ligne", { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } })
+            );
+          }
+          const cached = (await caches.match(req)) || (await caches.match("/"));
+          return (
+            cached ||
+            (await caches.match("/offline.html")) ||
+            new Response("Hors ligne", { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } })
+          );
+        })
+    );
+    return;
+  }
+
+  /* ── 2. GET /api/* : network-first → cache de secours ────────────────── */
+  if (url.pathname.startsWith("/api/") && !isApiExcluded(url.pathname)) {
+    event.respondWith(
+      fetch(req)
+        .then(async (res) => {
+          // Cache des réponses valides sans cookie de session
+          if (res.ok && res.status === 200 && !res.headers.get("set-cookie")) {
+            const cache = await caches.open(API_CACHE);
+            cache
+              .put(req, res.clone())
+              .then(() => trimApiCache(cache))
+              .catch(() => {});
+          }
+          return res;
+        })
+        .catch(async () => {
+          const cache = await caches.open(API_CACHE);
+          const cached = await cache.match(req, { ignoreVary: true });
+          if (cached) {
+            // Marqueur « données potentiellement périmées » pour l'app
+            const headers = new Headers(cached.headers);
+            headers.set("X-Orbit-Offline", "1");
+            return new Response(cached.body, {
+              status: cached.status,
+              statusText: cached.statusText || "OK",
+              headers,
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              error: "Hors ligne — cette donnée n'est pas encore en cache.",
+            }),
+            {
+              status: 503,
+              headers: {
+                "Content-Type": "application/json",
+                "X-Orbit-Offline": "1",
+              },
+            }
+          );
+        })
+    );
+    return;
+  }
+
+  // Hors navigation/API : en dev on ne touche à RIEN (jamais /_next/, jamais /)
+  if (IS_DEV) return;
+
+  if (url.pathname.startsWith("/api/")) return; // APIs exclues : réseau direct
+  if (url.pathname.startsWith("/_next/webpack-hmr")) return;
+
+  /* ── 3. Statiques (prod) : cache-first (chunks hashés par contenu) ───── */
+  event.respondWith(
+    caches.match(req).then(
+      (cached) =>
+        cached ||
+        fetch(req).then((res) => {
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy));
+          }
+          return res;
+        })
+    )
+  );
+});
+
+/* ══════════════════ Web Push (v3, inchangé) ══════════════════
    Payload serveur (lib/push.ts) :
    { title, body, tag?, url?, kind?, type?, data: { view?, eventId?,
      taskId?, emailId?, notificationId? }, actions?, requireInteraction?,

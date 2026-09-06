@@ -8,6 +8,10 @@
 //   2. Alertes personnalisées (auth par session, corps validé) :
 //      POST { "type": "custom", title, body } → push + historique (spec
 //      « alertes personnalisées »). Rate limité.
+//      POST { "type": "custom", title, body, scheduledAt (ISO futur, max 7 j) }
+//      → FILE D'ATTENTE planifiée : Notification.scheduledAt, envoyée à
+//      l'échéance par le cycle (reminders) — queue indépendante de la
+//      connexion client (le serveur envoie même app fermée).
 //
 //   3. Rappels automatiques (auth par secret de service — reminder-service :3032) :
 //      POST { "type": "reminders" } + header "x-orbit-service-secret"
@@ -21,12 +25,19 @@
 //          restantes) + imminence H-1 (filet de sécurité existant).
 //        • EMAILS IMPORTANTS : l'IA a détecté un rendez-vous (suggestedEvent)
 //          non confirmé → « à traiter » (une seule fois par email).
+//        • FILE PLANIFIÉE : Notification.scheduledAt échues non envoyées →
+//          envoi immédiat (sendExistingNotification).
 //      Anti-doublons : reminderLog (occurrence::minutes::type) pour les
 //      événements, reminderSentAt (H-1) pour les tâches, et Notification
 //      (type + ids, filtrage mémoire — SQLite sans JSON path filter) pour
 //      les scans journaliers. Les utilisateurs sans appareil ne sont PAS
 //      marqués : s'ils s'abonnent avant l'heure, ils recevront leur rappel.
 //      Hygiène : purge des notifications > 30 jours à chaque cycle.
+//
+//   4. Synchronisation email (auth par secret de service — reminder-service) :
+//      POST { "type": "email-sync" } + header "x-orbit-service-secret"
+//      → synchronise les comptes IMAP ÉCHUS (lastSyncAt + intervalle écoulé),
+//      lecture seule (lib/imap). Aucune action si aucun compte n'est dû.
 import { NextRequest, NextResponse } from "next/server"
 import { format, startOfDay, endOfDay } from "date-fns"
 import { fr } from "date-fns/locale"
@@ -39,12 +50,14 @@ import type { EventReminder, NotificationPreferenceDto } from "@/lib/types"
 import { Prisma } from "@prisma/client"
 import { notificationSendSchema } from "@/lib/validators"
 import { rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import { syncDueAccounts } from "@/lib/imap"
 import {
   cleanupOldNotifications,
   ensureWebPushConfigured,
   isPushConfigured,
   isQuietHours,
   sendPushToUser,
+  sendExistingNotification,
   type PushSendReport,
 } from "@/lib/push"
 
@@ -165,12 +178,39 @@ async function notifyTest(userId: string): Promise<Response> {
 
 // ── Mode 2 : alerte personnalisée (session utilisateur) ─────────────────────
 
-async function notifyCustom(userId: string, title: string, body: string, tag?: string): Promise<Response> {
+/**
+ * scheduledAt fourni (futur) : l'alerte rejoint la FILE D'ATTENTE planifiée
+ * (Notification.scheduledAt, isSent=false) — aucun envoi immédiat, le cycle
+ * « reminders » l'enverra pile à l'échéance (queue serveur, indépendante
+ * de la connexion du client). Sans scheduledAt : envoi immédiat.
+ */
+async function notifyCustom(
+  userId: string,
+  title: string,
+  body: string,
+  tag?: string,
+  scheduledAt?: string
+): Promise<Response> {
   if (!ensureWebPushConfigured()) {
     return NextResponse.json(
       { error: "Notifications non configurées (clés VAPID absentes)" },
       { status: 503 }
     )
+  }
+
+  if (scheduledAt) {
+    const notification = await db.notification.create({
+      data: {
+        userId,
+        type: "CUSTOM",
+        title: title.trim().slice(0, 100),
+        body: body.trim().slice(0, 500),
+        data: { view: "notifications" },
+        isSent: false,
+        scheduledAt: new Date(scheduledAt),
+      },
+    })
+    return NextResponse.json({ ok: true, scheduled: true, notificationId: notification.id })
   }
 
   const report = await sendPushToUser(userId, {
@@ -232,6 +272,7 @@ async function notifyReminders(): Promise<Response> {
   let emailsNotified = 0
   let quietBlocked = 0
   let emailsSent = 0
+  let scheduledSent = 0
 
   // Hygiène : purge de l'historique > 30 jours (spec performance).
   const cleaned = await cleanupOldNotifications()
@@ -521,6 +562,26 @@ async function notifyReminders(): Promise<Response> {
     }
   }
 
+  // ── FILE D'ATTENTE PLANIFIÉE (scheduledAt échues, non envoyées) ──────
+  // Alerte programmée par l'utilisateur : l'heure choisie prime sur les
+  // heures calmes (choix explicite). Envoi via sendExistingNotification
+  // (aucune nouvelle ligne d'historique — la ligne existante est marquée).
+  const dueScheduled = await db.notification.findMany({
+    where: { scheduledAt: { lte: now }, isSent: false },
+    take: 50,
+  })
+  for (const scheduled of dueScheduled) {
+    try {
+      const r = await sendExistingNotification(scheduled)
+      report.sent += r.sent
+      report.removed += r.removed
+      report.failed += r.failed
+      scheduledSent++
+    } catch {
+      // configuration VAPID/DB indisponible → retenté au prochain cycle
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     scannedAt: now.toISOString(),
@@ -528,6 +589,7 @@ async function notifyReminders(): Promise<Response> {
     emailsSent,
     tasksNotified,
     emailsNotified,
+    scheduledSent,
     quietBlocked,
     cleaned,
     report,
@@ -546,6 +608,36 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Secret de service invalide" }, { status: 401 })
     }
     return notifyReminders()
+  }
+
+  if (type === "email-sync") {
+    // Synchronisation des comptes IMAP dus : authentification par secret de
+    // service (reminder-service :3032). Lecture seule, erreurs isolées par
+    // compte — un compte en échec ne bloque jamais le cycle de rappels.
+    if (!isServiceAuthorized(req)) {
+      return NextResponse.json({ error: "Secret de service invalide" }, { status: 401 })
+    }
+    try {
+      const { due, results } = await syncDueAccounts()
+      const created = results.reduce((sum, r) => sum + r.created, 0)
+      return NextResponse.json({
+        ok: true,
+        due,
+        created,
+        results: results.map((r) => ({
+          accountId: r.accountId,
+          address: r.address,
+          ok: r.ok,
+          created: r.created,
+          error: r.error ?? undefined,
+        })),
+      })
+    } catch (error) {
+      return NextResponse.json(
+        { error: `Synchronisation impossible : ${(error as Error).message.slice(0, 200)}` },
+        { status: 500 }
+      )
+    }
   }
 
   if (type === "test") {
@@ -568,12 +660,12 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) {
       return NextResponse.json({ error: "Données invalides" }, { status: 400 })
     }
-    const { title, body: customBody, tag } = parsed.data
-    return notifyCustom(user.id, title, customBody, tag)
+    const { title, body: customBody, tag, scheduledAt } = parsed.data
+    return notifyCustom(user.id, title, customBody, tag, scheduledAt)
   }
 
   return NextResponse.json(
-    { error: "type invalide (valeurs : \"test\" | \"custom\" | \"reminders\")" },
+    { error: "type invalide (valeurs : \"test\" | \"custom\" | \"reminders\" | \"email-sync\")" },
     { status: 400 }
   )
 }
@@ -582,6 +674,11 @@ export async function GET() {
   // Diagnostic simple : état de la configuration push (sans exposer les clés).
   return NextResponse.json({
     configured: isPushConfigured(),
-    types: ["test (session)", "custom (session)", "reminders (secret de service)"],
+    types: [
+      "test (session)",
+      "custom (session — envoi immédiat ou planifié via scheduledAt)",
+      "reminders (secret de service)",
+      "email-sync (secret de service — comptes IMAP dus)",
+    ],
   })
 }

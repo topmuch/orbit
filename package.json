@@ -55,8 +55,10 @@
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
     "framer-motion": "^12.23.2",
+    "imapflow": "^1.7.8",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.525.0",
+    "mailparser": "^3.9.20",
     "next": "^16.1.1",
     "next-auth": "^4.24.11",
     "next-intl": "^4.3.4",
@@ -83,6 +85,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/mailparser": "^3.4.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/web-push": "^3.6.4",

@@ -226,6 +226,54 @@ export type EmailDto = {
   isRead: boolean
   isProcessed: boolean
   suggestedEvent: EventSuggestion | null
+  /** Adresse du compte IMAP d'origine (null = démo / synthétique) */
+  accountAddress: string | null
+}
+
+// ── Comptes email IMAP ─────────────────────────────────────────────────────
+
+/** Compte email IMAP — LE MOT DE PASSE N'EST JAMAIS EXPOSÉ (chiffré en base). */
+export type EmailAccountDto = {
+  id: string
+  label: string | null
+  address: string
+  imapHost: string
+  imapPort: number
+  imapSecure: boolean
+  username: string
+  allowSelfSigned: boolean
+  syncIntervalMin: number
+  fetchDays: number
+  maxMessages: number
+  isActive: boolean
+  lastSyncAt: string | null
+  lastSyncStatus: string | null // "ok" | "error"
+  lastSyncError: string | null
+  lastSyncCount: number | null
+  emailCount: number
+  createdAt: string
+}
+
+/** Résultat d'un test de connexion IMAP (aucun secret). */
+export type EmailAccountTestResult = {
+  ok: boolean
+  mailboxes: string[]
+  messageCount: number | null
+  error?: string
+}
+
+/** Résultat d'une synchronisation de comptes (aucun contenu d'email). */
+export type EmailSyncResult = {
+  ok: boolean
+  demo?: boolean
+  count: number
+  accounts?: Array<{
+    accountId: string
+    address: string
+    ok: boolean
+    created: number
+    error?: string
+  }>
 }
 
 export type StatsDto = {
@@ -273,6 +321,8 @@ export type NotificationDto = {
   data: { view?: NotificationTargetView; [key: string]: unknown } | null
   isRead: boolean
   isSent: boolean
+  /** File d'attente planifiée (Task 7) : envoi différé programmé par l'utilisateur. */
+  scheduledAt: string | null
   createdAt: string // ISO
 }
 

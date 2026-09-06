@@ -189,6 +189,85 @@ export async function sendPushToUser(
   return report
 }
 
+/**
+ * Envoie une notification DÉJÀ PERSISTÉE (file d'attente planifiée : les
+ * Notification.scheduledAt arrivées à échéance). Contrairement à
+ * sendPushToUser, aucune ligne n'est créée : la ligne existante est
+ * simplement marquée isSent/sentAt après l'envoi.
+ *
+ * Cas particulier : l'utilisateur n'a AUCUN appareil abonné → la notification
+ * reste livrée via le centre in-app (c'est sa seule destination possible) et
+ * est marquée envoyée pour ne pas être rejouée indéfiniment par le cycle.
+ */
+export async function sendExistingNotification(
+  notification: { id: string; userId: string; type: string; title: string; body: string; data: unknown }
+): Promise<PushSendReport> {
+  if (!ensureWebPushConfigured()) {
+    throw new Error("VAPID non configuré")
+  }
+
+  const title = sanitizeText(notification.title, TITLE_MAX)
+  const body = sanitizeText(notification.body, BODY_MAX)
+
+  const data = { ...(((notification.data ?? {}) as Record<string, unknown>)), notificationId: notification.id }
+  const wirePayload: PushPayload = {
+    title,
+    body,
+    tag: `orbit-scheduled-${notification.id}`,
+    type: (notification.type as PushPayload["type"]) ?? "SYSTEM",
+    data,
+  }
+
+  const subscriptions = await db.pushSubscription.findMany({
+    where: { userId: notification.userId, isActive: true },
+  })
+
+  const report: PushSendReport = { sent: 0, removed: 0, failed: 0, notificationId: notification.id }
+
+  if (!subscriptions.length) {
+    // Livraison in-app uniquement → considérée comme traitée
+    await db.notification
+      .update({ where: { id: notification.id }, data: { isSent: true, sentAt: new Date() } })
+      .catch(() => {})
+    return report
+  }
+
+  await Promise.all(
+    subscriptions.map(async (sub) => {
+      try {
+        await webpush.sendNotification(
+          { endpoint: sub.endpoint, keys: sub.keys as { p256dh: string; auth: string } },
+          JSON.stringify(wirePayload)
+        )
+        report.sent++
+        await db.pushSubscription
+          .update({ where: { id: sub.id }, data: { lastUsedAt: new Date() } })
+          .catch(() => {})
+      } catch (error) {
+        const statusCode = (error as { statusCode?: number }).statusCode
+        if (isDeadSubscription(statusCode)) {
+          await db.pushSubscription
+            .update({ where: { id: sub.id }, data: { isActive: false } })
+            .catch(() => {})
+          report.removed++
+        } else {
+          console.error("[orbit:push]", error)
+          report.failed++
+        }
+      }
+    })
+  )
+
+  await db.notification
+    .update({
+      where: { id: notification.id },
+      data: { isSent: true, sentAt: new Date() },
+    })
+    .catch(() => {})
+
+  return report
+}
+
 /** Compte les subscriptions actives d'un utilisateur (statut UI). */
 export async function countSubscriptions(userId: string): Promise<number> {
   return db.pushSubscription.count({ where: { userId, isActive: true } })

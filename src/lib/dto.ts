@@ -3,11 +3,12 @@
 // Lecture défensive des champs JSON (attendus de la validation Zod, mais
 // potentiellement corrompus/hérités) : toute valeur invalide est ignorée.
 
-import type { Event, Task, EmailLog, Tag, SubTask } from "@prisma/client"
+import type { Event, Task, EmailLog, EmailAccount, Tag, SubTask } from "@prisma/client"
 import type {
   EventDto,
   TaskDto,
   EmailDto,
+  EmailAccountDto,
   EventSuggestion,
   RecurrenceRule,
   EventAttendee,
@@ -165,7 +166,7 @@ export function toTaskDto(t: TaskWithRelations): TaskDto {
   }
 }
 
-export function toEmailDto(e: EmailLog): EmailDto {
+export function toEmailDto(e: EmailLog & { account?: { address: string } | null }): EmailDto {
   const raw = e.suggestedEvent as EventSuggestion | null
   let suggested: EventSuggestion | null = null
   if (raw && typeof raw === "object" && raw.title && raw.startTime) {
@@ -188,6 +189,36 @@ export function toEmailDto(e: EmailLog): EmailDto {
     isRead: e.isRead,
     isProcessed: e.isProcessed,
     suggestedEvent: suggested,
+    accountAddress: e.account?.address ?? null,
+  }
+}
+
+// ── Comptes email IMAP ─────────────────────────────────────────────────────
+
+/** Compte Prisma avec compteur d'emails chargé (count via groupBy). */
+export type EmailAccountWithCount = EmailAccount & { emailCount?: number }
+
+/** Sérialisation SANS SECRETS — passwordEnc n'existe pas dans le DTO. */
+export function toEmailAccountDto(a: EmailAccountWithCount): EmailAccountDto {
+  return {
+    id: a.id,
+    label: a.label,
+    address: a.address,
+    imapHost: a.imapHost,
+    imapPort: a.imapPort,
+    imapSecure: a.imapSecure,
+    username: a.username,
+    allowSelfSigned: a.allowSelfSigned,
+    syncIntervalMin: a.syncIntervalMin,
+    fetchDays: a.fetchDays,
+    maxMessages: a.maxMessages,
+    isActive: a.isActive,
+    lastSyncAt: a.lastSyncAt?.toISOString() ?? null,
+    lastSyncStatus: a.lastSyncStatus,
+    lastSyncError: a.lastSyncError,
+    lastSyncCount: a.lastSyncCount,
+    emailCount: a.emailCount ?? 0,
+    createdAt: a.createdAt.toISOString(),
   }
 }
 
@@ -228,6 +259,7 @@ export function toNotificationDto(n: Notification): NotificationDto {
     data: Object.keys(data).length ? data : null,
     isRead: n.isRead,
     isSent: n.isSent,
+    scheduledAt: n.scheduledAt?.toISOString() ?? null,
     createdAt: n.createdAt.toISOString(),
   }
 }

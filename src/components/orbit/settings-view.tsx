@@ -33,8 +33,10 @@ import { useTimezone } from "@/hooks/useTimezone"
 import { TimezoneSelector } from "@/components/orbit/timezone-selector"
 import { timezoneLabel } from "@/lib/timezone"
 import { usePwaStore } from "@/lib/pwa-store"
+import { useOfflineQueueStore } from "@/lib/offline-queue"
 import { promptInstall } from "@/components/orbit/pwa-register"
 import { DesignSystemShowcase } from "@/components/orbit/design-system-showcase"
+import { EmailAccountsCard } from "@/components/orbit/email-accounts-card"
 import type { SessionUser } from "@/lib/types"
 import type { NotificationPreferenceDto } from "@/lib/types"
 import {
@@ -63,11 +65,13 @@ import {
   ListTodo,
   Mail,
   Bot,
+  CloudUpload,
 } from "lucide-react"
 
 export function SettingsView({ user }: { user: SessionUser }) {
   const { theme, setTheme } = useTheme()
   const { online, canInstall, installed, swReady } = usePwaStore()
+  const offlineQueueCount = useOfflineQueueStore((s) => s.count)
   const profile = useProfileMutation()
   // 12-c : fuseau d'affichage du calendrier (instance useTimezone + persistance
   // profil via PATCH /api/profile — cf. useTimezone ; l'affichage de chaque vue
@@ -320,6 +324,9 @@ export function SettingsView({ user }: { user: SessionUser }) {
         {/* ---------- Préférences de notifications (types, timing, heures calmes) ---------- */}
         <NotificationPreferencesCard />
 
+        {/* ---------- Comptes email IMAP (Task 6 : emails réels) ---------- */}
+        <EmailAccountsCard />
+
         {/* ---------- Application ---------- */}
         <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
           <CardHeader>
@@ -339,6 +346,15 @@ export function SettingsView({ user }: { user: SessionUser }) {
                 <Check className="size-3" aria-hidden />
                 {swReady ? "Cache hors-ligne actif" : "Cache en préparation"}
               </Badge>
+              {offlineQueueCount > 0 && (
+                <Badge
+                  variant="outline"
+                  className="gap-1.5 border-amber-500/40 text-amber-600 dark:text-amber-400"
+                >
+                  <CloudUpload className="size-3" aria-hidden />
+                  {offlineQueueCount} action{offlineQueueCount > 1 ? "s" : ""} en attente
+                </Badge>
+              )}
               {installed && (
                 <Badge className="gap-1.5 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
                   <Check className="size-3" aria-hidden />
@@ -354,8 +370,11 @@ export function SettingsView({ user }: { user: SessionUser }) {
               </Button>
             )}
             <p className="text-xs leading-relaxed text-muted-foreground">
-              Orbit est une PWA : installée, elle démarre instantanément, fonctionne
-              hors-ligne pour la consultation et s&apos;intègre à votre écran d&apos;accueil.
+              Orbit est une PWA : installée, elle démarre instantanément, s&apos;intègre à
+              votre écran d&apos;accueil et fonctionne hors-ligne — vos données en cache
+              restent consultables, et vos actions (tâches, événements, emails…) sont
+              mises en file d&apos;attente puis synchronisées automatiquement dès le retour
+              du réseau.
             </p>
           </CardContent>
         </Card>

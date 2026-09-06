@@ -1,6 +1,7 @@
 "use client";
 
 // Orbit — Enregistrement du Service Worker + suivi en ligne/hors ligne + installation PWA
+//            + REPLAY de la file d'attente offline (Task 7)
 
 import { useEffect } from "react";
 import { toast } from "sonner";
@@ -10,6 +11,7 @@ import {
   getInstallPrompt,
   type InstallPromptEvent,
 } from "@/lib/pwa-store";
+import { replayQueue, refreshCount } from "@/lib/offline-queue";
 
 export function PwaRegister() {
   const setOnline = usePwaStore((s) => s.setOnline);
@@ -18,10 +20,11 @@ export function PwaRegister() {
   const setSwReady = usePwaStore((s) => s.setSwReady);
 
   useEffect(() => {
-    // 1. Service Worker — enregistré PARTOUT (dev inclus) : le sw.js v3
-    //    DÉSACTIVE son handler fetch en dev (localhost) → aucun risque de
-    //    bundle gelé (bug 13-b : cache-first des chunks /_next/ non hashés),
-    //    mais les notifications push restent testables en développement.
+    // 1. Service Worker — enregistré PARTOUT (dev inclus) : le sw.js v4
+    //    limite son handler fetch en dev aux GET /api (cache offline) et à
+    //    la navigation de secours → aucun risque de bundle gelé (bug 13-b :
+    //    les chunks /_next/ dev ne sont JAMAIS mis en cache), mais les
+    //    notifications push ET la lecture offline restent testables en dev.
     //    En production, cache-first sûr (chunks hashés par contenu).
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
@@ -30,16 +33,33 @@ export function PwaRegister() {
         .catch(() => setSwReady(false));
     }
 
-    // 2. Connectivité
+    // 2. Connectivité + replay de la file offline
     const updateOnline = () => {
       const online = navigator.onLine;
       setOnline(online);
-      if (online) toast.success("Connexion rétablie", { description: "Orbit resynchronise vos données." });
-      else toast.warning("Mode hors ligne", { description: "Consultez vos données en cache local." });
+      if (online) {
+        toast.success("Connexion rétablie", { description: "Orbit resynchronise vos données." });
+        // Replay immédiat des mutations stockées pendant la coupure
+        void replayQueue();
+      } else {
+        toast.warning("Mode hors ligne", {
+          description: "Consultez vos données en cache — vos actions seront mises en file d'attente.",
+        });
+      }
     };
     setOnline(navigator.onLine);
     window.addEventListener("online", updateOnline);
     window.addEventListener("offline", updateOnline);
+
+    // Au montage : compteur de file + replay silencieux du reste (page
+    // rechargée pendant la coupure, ou replay interrompu par un 5xx)
+    void refreshCount();
+    if (navigator.onLine) void replayQueue({ silent: true });
+    // Garde périodique : une mutation mise en file par un autre onglet,
+    // ou un réseau revenu sans déclencher l'événement « online »
+    const replayGuard = setInterval(() => {
+      if (navigator.onLine) void replayQueue({ silent: true });
+    }, 60_000);
 
     // 3. Installation PWA
     const onBeforeInstall = (e: Event) => {
@@ -60,6 +80,7 @@ export function PwaRegister() {
       window.removeEventListener("offline", updateOnline);
       window.removeEventListener("beforeinstallprompt", onBeforeInstall);
       window.removeEventListener("appinstalled", onInstalled);
+      clearInterval(replayGuard);
     };
   }, [setOnline, setCanInstall, setInstalled, setSwReady]);
 
