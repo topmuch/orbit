@@ -102,14 +102,17 @@
   --chart-3: #0a2540;
   --chart-4: #7fe6ff;
   --chart-5: #5c6674;
-  --sidebar: #ffffff;
-  --sidebar-foreground: #1a1a1a;
-  --sidebar-primary: #0a2540;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #dff5fe;
-  --sidebar-accent-foreground: #0a2540;
-  --sidebar-border: #dce1e8;
-  --sidebar-ring: #00d4ff;
+  /* Sidebar rose foncé (demande utilisateur 21) — le shell applicatif
+     utilise un dégradé pink-800 → rose-950 ; ces tokens suivent la
+     même teinte pour tout consommateur futur de bg-sidebar. */
+  --sidebar: #9d174d;
+  --sidebar-foreground: #ffe4ec;
+  --sidebar-primary: #fdf2f8;
+  --sidebar-primary-foreground: #881337;
+  --sidebar-accent: #ad2a63;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #b93368;
+  --sidebar-ring: #f9a8d4;
 }
 
 .dark {
@@ -137,14 +140,14 @@
   --chart-3: #7fe6ff;
   --chart-4: #b8e8f7;
   --chart-5: #8ca3b8;
-  --sidebar: #0a2236;
-  --sidebar-foreground: #e8f1f8;
-  --sidebar-primary: #00d4ff;
-  --sidebar-primary-foreground: #06182b;
-  --sidebar-accent: #0f3b5f;
-  --sidebar-accent-foreground: #7fe6ff;
-  --sidebar-border: #143a5c;
-  --sidebar-ring: #00d4ff;
+  --sidebar: #4c0519;
+  --sidebar-foreground: #ffe4ec;
+  --sidebar-primary: #f9a8d4;
+  --sidebar-primary-foreground: #4c0519;
+  --sidebar-accent: #6d1240;
+  --sidebar-accent-foreground: #ffe4ec;
+  --sidebar-border: #6d1240;
+  --sidebar-ring: #f9a8d4;
 }
 
 @layer base {

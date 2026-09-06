@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { EventCard, eventKeyOf } from "@/components/orbit/event-card"
 import { EventDialog } from "@/components/orbit/event-dialog"
 import { TaskModal } from "@/components/orbit/tasks/task-modal"
+import { KpiCard } from "@/components/orbit/kpi-card"
 import { PRIORITY_COLORS } from "@/components/orbit/tasks/priority-badge"
 // 20-c : section « Analytique » (stats + graphiques Recharts)
 import { StatsCards } from "@/components/orbit/analytics/StatsCards"
@@ -157,64 +158,54 @@ export function DashboardView({
           Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28 rounded-xl" />)
         ) : (
           <>
-            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <CalendarDays className="size-5 text-primary" aria-hidden />
-                  <span className="text-3xl font-semibold tabular-nums">{stats.eventsToday}</span>
-                </div>
-                <p className="mt-2 text-sm font-medium">Événements aujourd&apos;hui</p>
-                <p className="text-xs text-muted-foreground">
-                  {stats.eventsToday > 0
-                    ? `de ${fmt(parseISO(stats.todayEvents[0].startTime), "HH:mm")} à ${fmt(parseISO(stats.todayEvents[stats.todayEvents.length - 1].endTime), "HH:mm")}`
-                    : "Journée libre"}
-                </p>
-              </CardContent>
-            </Card>
+            <KpiCard
+              tone="rose"
+              icon={CalendarDays}
+              value={stats.eventsToday}
+              label="Événements aujourd&apos;hui"
+              sub={
+                stats.eventsToday > 0
+                  ? `de ${fmt(parseISO(stats.todayEvents[0].startTime), "HH:mm")} à ${fmt(parseISO(stats.todayEvents[stats.todayEvents.length - 1].endTime), "HH:mm")}`
+                  : "Journée libre"
+              }
+            />
 
-            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <ListTodo className="size-5 text-emerald-500" aria-hidden />
-                  <span className="text-3xl font-semibold tabular-nums">
-                    {stats.tasksTodo + stats.tasksDoing}
-                  </span>
-                </div>
-                <p className="mt-2 text-sm font-medium">Tâches actives</p>
-                <p className="text-xs text-muted-foreground">
+            <KpiCard
+              tone="orange"
+              icon={ListTodo}
+              value={stats.tasksTodo + stats.tasksDoing}
+              label="Tâches actives"
+              sub={
+                <>
                   {stats.tasksDoing} en cours
                   {stats.tasksOverdue > 0 && (
-                    <span className="text-red-500"> · {stats.tasksOverdue} en retard</span>
+                    <span className="font-semibold text-white">
+                      {" · "}{stats.tasksOverdue} en retard
+                    </span>
                   )}
-                </p>
-              </CardContent>
-            </Card>
+                </>
+              }
+            />
 
-            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <Mail className="size-5 text-violet-500" aria-hidden />
-                  <span className="text-3xl font-semibold tabular-nums">{stats.unreadEmails}</span>
-                </div>
-                <p className="mt-2 text-sm font-medium">Emails non lus</p>
-                <p className="text-xs text-muted-foreground">
-                  {stats.unprocessedEmails > 0
-                    ? `${stats.unprocessedEmails} à analyser`
-                    : "Boîte à jour"}
-                </p>
-              </CardContent>
-            </Card>
+            <KpiCard
+              tone="bleu"
+              icon={Mail}
+              value={stats.unreadEmails}
+              label="Emails non lus"
+              sub={
+                stats.unprocessedEmails > 0
+                  ? `${stats.unprocessedEmails} à analyser`
+                  : "Boîte à jour"
+              }
+            />
 
-            <Card className="border-border/60 bg-card/70 backdrop-blur-sm">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <CheckCircle2 className="size-5 text-teal-500" aria-hidden />
-                  <span className="text-3xl font-semibold tabular-nums">{stats.tasksDone}</span>
-                </div>
-                <p className="mt-2 text-sm font-medium">Tâches terminées</p>
-                <p className="text-xs text-muted-foreground">Gardez le rythme ✨</p>
-              </CardContent>
-            </Card>
+            <KpiCard
+              tone="jaune"
+              icon={CheckCircle2}
+              value={stats.tasksDone}
+              label="Tâches terminées"
+              sub="Gardez le rythme ✨"
+            />
           </>
         )}
       </div>

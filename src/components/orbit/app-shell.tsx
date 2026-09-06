@@ -107,13 +107,13 @@ export function AppShell({
 
   return (
     <div className="flex min-h-screen">
-      {/* ---------- Sidebar (desktop) ---------- */}
-      <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-border/60 bg-sidebar/60 backdrop-blur-md lg:flex">
+      {/* ---------- Sidebar (desktop) — rose foncé (demande utilisateur 21) ---------- */}
+      <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-white/10 bg-gradient-to-b from-pink-800 via-rose-900 to-rose-950 lg:flex">
         <div className="flex items-center gap-2.5 px-5 py-5">
           <OrbitLogo size={34} />
           <div className="leading-tight">
-            <p className="text-base font-semibold tracking-tight">Orbit</p>
-            <p className="text-[11px] text-muted-foreground">{t("nav.personalOs")}</p>
+            <p className="text-base font-semibold tracking-tight text-white">Orbit</p>
+            <p className="text-[11px] text-pink-200/80">{t("nav.personalOs")}</p>
           </div>
         </div>
 
@@ -126,15 +126,15 @@ export function AppShell({
                 onClick={() => onNavigate(v)}
                 className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                   active
-                    ? "bg-primary/15 text-primary"
-                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                    ? "bg-white/15 text-white"
+                    : "text-pink-100/75 hover:bg-white/10 hover:text-white"
                 }`}
                 aria-current={active ? "page" : undefined}
               >
                 <Icon className="size-4.5 shrink-0" aria-hidden />
                 <span className="flex-1 text-left">{t(`nav.${v}`)}</span>
                 {v === "emails" && unread > 0 && (
-                  <Badge className="bg-violet-500/20 px-1.5 text-[10px] text-violet-600 dark:text-violet-400">
+                  <Badge className="bg-white/20 px-1.5 text-[10px] text-white">
                     {unread}
                   </Badge>
                 )}
@@ -144,20 +144,20 @@ export function AppShell({
         </nav>
 
         <div className="p-3">
-          <div className="flex items-center gap-3 rounded-xl border border-border/60 bg-card/60 p-3">
-            <Avatar className="size-9 border border-border/60">
-              <AvatarFallback className="bg-primary/15 text-xs font-semibold text-primary">
+          <div className="flex items-center gap-3 rounded-xl border border-white/15 bg-white/10 p-3">
+            <Avatar className="size-9 border border-white/15">
+              <AvatarFallback className="bg-white/15 text-xs font-semibold text-white">
                 {initials || "OR"}
               </AvatarFallback>
             </Avatar>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium">{user.name ?? "Utilisateur"}</p>
-              <p className="truncate text-[11px] text-muted-foreground">{user.email}</p>
+              <p className="truncate text-sm font-medium text-white">{user.name ?? "Utilisateur"}</p>
+              <p className="truncate text-[11px] text-pink-200/70">{user.email}</p>
             </div>
             <Button
               variant="ghost"
               size="icon"
-              className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+              className="size-8 shrink-0 text-pink-200/70 hover:bg-white/10 hover:text-white"
               onClick={onLogout}
               aria-label={t("nav.logout")}
             >
@@ -262,9 +262,9 @@ export function AppShell({
           Orbit · Vos données restent chez vous · {new Date().getFullYear()}
         </footer>
 
-        {/* Bottom nav (mobile) */}
+        {/* Bottom nav (mobile) — assortie au sidebar rose foncé (même dégradé) */}
         <nav
-          className="fixed inset-x-0 bottom-0 z-40 flex border-t border-border/60 bg-background/90 backdrop-blur-md lg:hidden"
+          className="fixed inset-x-0 bottom-0 z-40 flex border-t border-white/10 bg-rose-900/95 backdrop-blur-md lg:hidden"
           style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.375rem)" }}
           aria-label={t("nav.mobileNav")}
         >
@@ -275,7 +275,7 @@ export function AppShell({
                 key={v}
                 onClick={() => onNavigate(v)}
                 className={`relative flex min-h-[44px] flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[10px] font-medium transition-colors ${
-                  active ? "text-primary" : "text-muted-foreground"
+                  active ? "text-white" : "text-pink-200/65"
                 }`}
                 aria-current={active ? "page" : undefined}
               >
@@ -283,7 +283,7 @@ export function AppShell({
                   <Icon className="size-5" aria-hidden />
                   {v === "emails" && unread > 0 && (
                     <span
-                      className="absolute -right-1.5 -top-1 size-2 rounded-full bg-violet-500"
+                      className="absolute -right-1.5 -top-1 size-2 rounded-full bg-pink-400"
                       aria-hidden
                     />
                   )}
@@ -291,7 +291,7 @@ export function AppShell({
                 <span className="truncate">{t(`nav.${v}`).split(" ")[0]}</span>
                 {active && (
                   <span
-                    className="absolute top-0 h-0.5 w-8 rounded-full bg-primary"
+                    className="absolute top-0 h-0.5 w-8 rounded-full bg-pink-400"
                     aria-hidden
                   />
                 )}

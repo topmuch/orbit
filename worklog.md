@@ -825,3 +825,23 @@ Work Log:
 Stage Summary:
 - 60 fichiers, +6210/-62 : recherche full-text (SQLite + Meilisearch prod), palette Ctrl+K, raccourcis clavier, thème système, i18n fr/en/es, analytics Recharts, onboarding, API publique /api/v1 (clés SHA-256), webhooks HMAC-SHA256 (secrets AES-GCM, logs, purge 100), import/export JSON/CSV/iCal, performance (code-splitting par vue, optimizePackageImports), compose prod + .env.example Meilisearch (profil « search »).
 - Lint 0 erreur, tsc 0 erreur, 0 erreur console navigateur, overflow mobile 0 px, serveur dev :3000 + :3031 + :3032 sains.
+
+---
+Task ID: 21
+Agent: main (Z.ai Code)
+Task: Demandes utilisateur dashboard — (1) sidebar en rose foncé, (2) cartes KPI multicolores rose/orange/bleu/jaune
+
+Work Log:
+- src/components/orbit/kpi-card.tsx (NOUVEAU) : composant KpiCard partagé, prop tone "rose"|"orange"|"bleu"|"jaune" — dégradés diagonaux (coin clair → extrémité sombre ≥ 4.5:1 pour les libellés : rose-700/orange-700/blue-700), pastille d'icône translucide (white/25, black/10 sur jaune), valeur text-2xl sm:text-3xl tabular-nums, sous-libellé tonal (rose-100/orange-50/sky-50/amber-900/80) ; texte blanc sur tons saturés, ambre-950 sur jaune (le blanc échoue sur jaune) ; zéro chaîne visible (label/sub = ReactNode de l'appelant, i18n conservé)
+- dashboard-view.tsx : les 4 cartes « Statistiques » remplacées par KpiCard (rose=Événements, orange=Tâches actives, bleu=Emails non lus, jaune=Tâches terminées) ; span « N en retard » passe de text-red-500 (illisible sur orange) à font-semibold text-white ; tout le reste intact (Semaine à venir neutre, agenda, priorités, emails, dialogs)
+- analytics/StatsCards.tsx : les 6 cartes passées à KpiCard avec cycle des 4 tons (rose, orange, bleu, jaune, rose, orange) ; valeur « En retard » red-500 → blanc (contraste sur bleu) ; imports Card/CardContent supprimés, clés t() inchangées
+- app-shell.tsx sidebar : dégradé rose foncé from-pink-800 via-rose-900 to-rose-950 (identique clair/sombre, backdrop-blur et bg-sidebar/60 retirés) ; textes restylés pour fond sombre : titre blanc, sous-titre pink-200/80, nav active bg-white/15 text-white, inactive pink-100/75 hover:bg-white/10, badge unread violet → bg-white/20 text-white, carte utilisateur border-white/15 bg-white/10 (avatar bg-white/15), logout pink-200/70 hover blanc
+- app-shell.tsx bottom nav mobile (équivalente au sidebar en mobile) : bg-rose-900/95 backdrop-blur + border-white/10, actif text-white + barre/dot pink-400, inactif pink-200/65
+- globals.css : tokens --sidebar* passés en teinte rose (clair #9d174d / sombre #4c0519 + accent/ring roses) pour cohérence avec tout futur consommateur de bg-sidebar (le shadcn ui/sidebar.tsx n'est pas utilisé par l'app)
+- QA : bun run lint 0 erreur ; tsc 0 erreur sur les 5 fichiers touchés (erreurs préexistantes hors src/ uniquement) ; next-server retrouvé tué silencieusement pendant la QA → redémarré, SW désenregistré pour repartir propre ; agent-browser : login session active → dashboard vérifié en clair (VLM : « magenta foncé » + KPI multicolores lisibles, zéro défaut) ET sombre (VLM : idem) ET mobile 390px (grille 2×2 lisible, zéro overflow horizontal, nav bas rose-900 vérifiée au computed style) ; DOM vérifié : 10 cartes avec les bons dégradés, nav mobile bg-rose-900/95 ; navigation dashboard↔calendrier OK ; 0 erreur console, 0 erreur dev.log
+- Ajustement pendant QA : nav mobile d'abord rose-950/95 (VLM la lisait « noire » en sombre) → rose-900/95, plus clairement rose foncé dans les deux thèmes
+
+Stage Summary:
+- Sidebar rose foncé (dégradé pink-800 → rose-950) + textes blancs/roses lisibles, bottom nav mobile assortie (rose-900)
+- 10 cartes KPI multicolores via KpiCard partagé : 4 stats principales (rose/orange/bleu/jaune) + 6 analytics (cycle) — contraste AA respecté (blanc sur zones sombres des dégradés, ambre foncé sur jaune)
+- Fichiers : kpi-card.tsx (NOUVEAU), dashboard-view.tsx, analytics/StatsCards.tsx, app-shell.tsx, globals.css — aucune logique/i18n/API modifiée, purement présentationnel
